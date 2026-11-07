@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "tcp_server", .file = "src/tcp_server.zig", .features = .{
             .flashless = false,
             .lwip = true,
+            .esp32_c6 = true,
         } },
     };
 

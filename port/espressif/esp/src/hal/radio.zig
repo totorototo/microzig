@@ -10,8 +10,8 @@ const c = @import("esp-wifi-driver");
 const microzig = @import("microzig");
 const TrapFrame = microzig.cpu.TrapFrame;
 const peripherals = microzig.chip.peripherals;
-const RTC_CNTL = peripherals.RTC_CNTL;
-const APB_CTRL = peripherals.APB_CTRL;
+const compatibility = @import("compatibility.zig");
+const clocks_c6 = @import("radio/clocks_esp32_c6.zig");
 
 const efuse = @import("efuse.zig");
 pub const bluetooth = @import("radio/bluetooth.zig");
@@ -99,6 +99,16 @@ pub fn read_mac(iface: enum {
 }
 
 fn enable_wifi_power_domain_and_init_clocks() void {
+    switch (compatibility.chip) {
+        .esp32_c3 => enable_wifi_power_domain_and_init_clocks_c3(),
+        .esp32_c6 => clocks_c6.init(),
+    }
+}
+
+fn enable_wifi_power_domain_and_init_clocks_c3() void {
+    const RTC_CNTL = peripherals.RTC_CNTL;
+    const APB_CTRL = peripherals.APB_CTRL;
+
     const system_wifibb_rst: u32 = 1 << 0;
     const system_fe_rst: u32 = 1 << 1;
     const system_wifimac_rst: u32 = 1 << 2;

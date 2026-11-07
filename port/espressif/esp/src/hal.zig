@@ -63,6 +63,8 @@ pub fn init_sequence(clock_cfg: clocks.Config) void {
     if (compatibility.chip == .esp32_c6)
         disable_access_permission_filters_c6();
 
+    rng.init();
+
     clock_cfg.apply();
 
     system.init();

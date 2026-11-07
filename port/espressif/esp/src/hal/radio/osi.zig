@@ -6,7 +6,8 @@ const c = @import("esp-wifi-driver");
 const microzig = @import("microzig");
 const enter_critical_section = microzig.interrupt.enter_critical_section;
 const peripherals = microzig.chip.peripherals;
-const APB_CTRL = peripherals.APB_CTRL;
+const compatibility = @import("../compatibility.zig");
+const clocks_c6 = @import("clocks_esp32_c6.zig");
 const radio_interrupt = microzig.options.hal.radio.interrupt;
 
 const radio = @import("../radio.zig");
@@ -157,6 +158,19 @@ pub fn printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
     syslog(fmt, @cVaStart());
 }
 
+/// Referenced by the C6 PHY blob for debug output; dropped, like esp-radio does by default.
+pub fn putchar(ch: c_int) callconv(.c) c_int {
+    return ch;
+}
+
+/// XTAL frequency in MHz, referenced by the C6 PHY blob.
+pub fn rtc_clk_xtal_freq_get() callconv(.c) c_int {
+    return switch (compatibility.chip) {
+        .esp32_c3 => 40,
+        .esp32_c6 => peripherals.PCR.SYSCLK_CONF.read().CLK_XTAL_FREQ,
+    };
+}
+
 pub fn esp_fill_random(buf: [*c]u8, len: usize) callconv(.c) void {
     log.debug("esp_fill_random {any} {}", .{ buf, len });
 
@@ -192,6 +206,8 @@ pub fn export_symbols() void {
         @export(&printf, .{ .name = name });
     }
     @export(&esp_fill_random, .{ .name = "esp_fill_random" });
+    @export(&putchar, .{ .name = "putchar", .linkage = .weak });
+    @export(&rtc_clk_xtal_freq_get, .{ .name = "rtc_clk_xtal_freq_get", .linkage = .weak });
     @export(&esp_event_post, .{ .name = "esp_event_post" });
 }
 
@@ -869,6 +885,14 @@ const phy_init_data_default: c.esp_phy_init_data_t = .{
 };
 
 fn clocks_phy_set_enabled(enable: bool) void {
+    switch (compatibility.chip) {
+        .esp32_c3 => clocks_phy_set_enabled_c3(enable),
+        .esp32_c6 => clocks_c6.phy_clocks_set_enabled(enable),
+    }
+}
+
+fn clocks_phy_set_enabled_c3(enable: bool) void {
+    const APB_CTRL = peripherals.APB_CTRL;
     const system_wifi_clk_wifi_bt_common_m: u32 = 0x78078F;
 
     var wifi_clk_en = APB_CTRL.WIFI_CLK_EN.read().WIFI_CLK_EN;
@@ -959,20 +983,38 @@ pub fn timer_arm_us(ets_timer_ptr: ?*anyopaque, us: u32, repeat: bool) callconv(
 pub fn wifi_reset_mac() callconv(.c) void {
     log.debug("wifi_reset_mac", .{});
 
-    APB_CTRL.WIFI_RST_EN.write(.{ .WIFI_RST = APB_CTRL.WIFI_RST_EN.read().WIFI_RST | (1 << 2) });
-    APB_CTRL.WIFI_RST_EN.write(.{ .WIFI_RST = APB_CTRL.WIFI_RST_EN.read().WIFI_RST & ~@as(u32, 1 << 2) });
+    switch (compatibility.chip) {
+        .esp32_c3 => {
+            const APB_CTRL = peripherals.APB_CTRL;
+            APB_CTRL.WIFI_RST_EN.write(.{ .WIFI_RST = APB_CTRL.WIFI_RST_EN.read().WIFI_RST | (1 << 2) });
+            APB_CTRL.WIFI_RST_EN.write(.{ .WIFI_RST = APB_CTRL.WIFI_RST_EN.read().WIFI_RST & ~@as(u32, 1 << 2) });
+        },
+        // Same as ESP-IDF / esp-radio: no MAC reset on the C6.
+        .esp32_c6 => {},
+    }
 }
 
 pub fn wifi_clock_enable() callconv(.c) void {
     log.debug("wifi_clock_enable", .{});
 
     // no op on esp32c3
+    if (compatibility.chip == .esp32_c6) clocks_c6.wifi_clocks_set_enabled(true);
 }
 
 pub fn wifi_clock_disable() callconv(.c) void {
     log.debug("wifi_clock_disable", .{});
 
     // no op on esp32c3
+    if (compatibility.chip == .esp32_c6) clocks_c6.wifi_clocks_set_enabled(false);
+}
+
+pub fn regdma_link_set_write_wait_content(_: ?*anyopaque, _: u32, _: u32) callconv(.c) void {
+    log.err("regdma_link_set_write_wait_content: modem sleep retention is not supported", .{});
+}
+
+pub fn sleep_retention_find_link_by_id(_: c_int) callconv(.c) ?*anyopaque {
+    log.err("sleep_retention_find_link_by_id: modem sleep retention is not supported", .{});
+    return null;
 }
 
 pub fn wifi_rtc_enable_iso() callconv(.c) void {
@@ -1051,8 +1093,10 @@ pub fn random() callconv(.c) c_ulong {
 }
 
 pub fn slowclk_cal_get() callconv(.c) u32 {
-    // NOTE: esp32c3 specific
-    return 28639;
+    return switch (compatibility.chip) {
+        .esp32_c3 => 28639,
+        .esp32_c6 => clocks_c6.slowclk_cal(),
+    };
 }
 
 pub fn log_write(_: c_uint, _: [*c]const u8, fmt: [*c]const u8, ...) callconv(.c) void {
