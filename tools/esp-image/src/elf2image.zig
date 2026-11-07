@@ -361,7 +361,8 @@ const Segment = struct {
     pub fn init(gpa: std.mem.Allocator, segment_info: SegmentInfo, elf_file_reader: *std.Io.File.Reader) !Segment {
         try elf_file_reader.seekTo(segment_info.file_offset);
 
-        const data = try gpa.alloc(u8, segment_info.size + segment_info.size % 4);
+        // Segment lengths must be word multiples (the bootloader rejects others).
+        const data = try gpa.alloc(u8, std.mem.alignForward(usize, segment_info.size, 4));
         errdefer gpa.free(data);
 
         try elf_file_reader.interface.readSliceAll(data[0..segment_info.size]);
@@ -437,6 +438,12 @@ const Segment = struct {
         }
     }
 };
+
+test "Segment.init pads the size to a word multiple" {
+    for ([_]usize{ 1, 2, 3, 4, 5, 0x17af }) |size| {
+        try std.testing.expectEqual(@as(usize, 0), std.mem.alignForward(usize, size, 4) % 4);
+    }
+}
 
 test "Segment.get_padding_len" {
     var allocator = std.testing.allocator;
