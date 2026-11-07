@@ -267,7 +267,7 @@ pub const Pin = enum(u5) {
             .SLP_SEL = 0,
             .FUN_WPD = @intFromBool(config.pull == .down),
             .FUN_WPU = @intFromBool(config.pull == .up),
-            .FUN_DRV = @backingInt(config.drive_strength),
+            .FUN_DRV = config.drive_strength.to_value(self),
             .FUN_IE = @intFromBool(config.input_enable),
             .MCU_SEL = @backingInt(AlternateFunction.function1),
             .FILTER_EN = @intFromBool(config.input_filter_enable),
@@ -359,7 +359,7 @@ pub const Pin = enum(u5) {
 
     pub fn set_drive_strength(self: Pin, drive_strength: DriveStrength) void {
         IO_MUX.GPIO[@backingInt(self)].modify(.{
-            .FUN_DRV = @backingInt(drive_strength),
+            .FUN_DRV = drive_strength.to_value(self),
         });
     }
 
