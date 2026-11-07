@@ -219,9 +219,9 @@ pub const Channel = enum(u2) {
     pub fn is_duty_fade_done(chan: Channel) bool {
         return switch (chan) {
             .channel0 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH0_INT_RAW == 1,
-            .channel1 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH0_INT_RAW == 1,
-            .channel2 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH0_INT_RAW == 1,
-            .channel3 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH0_INT_RAW == 1,
+            .channel1 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH1_INT_RAW == 1,
+            .channel2 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH2_INT_RAW == 1,
+            .channel3 => LEDC.INT_RAW.read().DUTY_CHNG_END_LSCH3_INT_RAW == 1,
         };
     }
 
