@@ -492,15 +492,29 @@ pub const I2C = struct {
             }
         }
 
-        // Verify all commands were executed
+        // Verify all commands were executed. The done bits can lag the completion interrupt,
+        // so poll until the deadline instead of failing on the first look.
+        while (!self.all_commands_done()) {
+            try self.check_errors();
+            if (deadline.is_reached_by(time.get_time_since_boot()))
+                return Error.ExecutionIncomplete;
+        }
+    }
+
+    /// Whether every command up to the first END or STOP is marked done. An END command raises
+    /// END_DETECT but never sets its own done bit, so it is not checked (same as esp-hal).
+    fn all_commands_done(self: I2C) bool {
         for (0..self.get_regs().COMD.len) |i| {
             const cmd = self.get_regs().COMD[i].raw;
             const command: u14 = @truncate(cmd);
-            const command_done = cmd >> 31;
-            if (command != 0 and command_done == 0) {
-                return Error.ExecutionIncomplete;
-            }
+            if (command == 0) continue;
+
+            const opcode: u3 = @truncate(command >> 11);
+            if (opcode == @backingInt(Opcode.END)) return true;
+            if (cmd >> 31 == 0) return false;
+            if (opcode == @backingInt(Opcode.STOP)) return true;
         }
+        return true;
     }
 
     /// Read data from an I2C slave
