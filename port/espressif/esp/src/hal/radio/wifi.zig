@@ -8,6 +8,7 @@ const time = microzig.drivers.time;
 
 const radio = @import("../radio.zig");
 const osi = @import("osi.zig");
+const compatibility = @import("../compatibility.zig");
 
 const log = std.log.scoped(.esp_radio_wifi);
 
@@ -17,10 +18,10 @@ pub const Options = struct {
     on_packet_transmitted: ?*const fn (interface: Interface, data: []const u8, status: bool) void = null,
 };
 
-const InitError = std.mem.Allocator.Error || InternalError;
+const InitError = std.mem.Allocator.Error || PowerSaveError;
 
 pub const InitConfig = struct {
-    /// Power save mode.
+    /// Power save mode. Only `.none` is supported on the ESP32-C6.
     power_save_mode: PowerSaveMode = .none,
 
     /// Country info. If .auto the country info of the AP to which the station
@@ -373,7 +374,13 @@ pub const PowerSaveMode = enum(u32) {
     max = c.WIFI_PS_MAX_MODEM,
 };
 
-pub fn set_power_save_mode(mode: PowerSaveMode) InternalError!void {
+pub const PowerSaveError = InternalError || error{
+    /// Modem sleep needs the sleep retention hooks, which aren't ported on the ESP32-C6.
+    PowerSaveUnsupported,
+};
+
+pub fn set_power_save_mode(mode: PowerSaveMode) PowerSaveError!void {
+    if (compatibility.chip == .esp32_c6 and mode != .none) return error.PowerSaveUnsupported;
     try c_err(c.esp_wifi_set_ps(@backingInt(mode)));
 }
 
