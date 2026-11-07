@@ -166,7 +166,7 @@ pub const interrupt = struct {
 
     pub fn get_type(int: Interrupt) Type {
         const num = @backingInt(int);
-        return @fromBackingInt(@truncate(INTERRUPT_CORE0.CPU_INT_TYPE.raw & (@as(u32, 1) << num) >> num));
+        return @fromBackingInt(@truncate((INTERRUPT_CORE0.CPU_INT_TYPE.raw >> num) & 1));
     }
 
     pub const Source = enum(u6) {
