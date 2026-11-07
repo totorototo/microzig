@@ -91,28 +91,62 @@ pub const interrupt = struct {
 
     const INTERRUPT_CORE0 = microzig.chip.peripherals.INTERRUPT_CORE0;
 
+    /// CPU-side interrupt controller registers. On the ESP32-C3 they live in the
+    /// interrupt matrix block; on the ESP32-C6 they moved to the machine-mode PLIC.
+    const ctrl = switch (cpu_config.chip) {
+        .esp32_c3 => struct {
+            const enable = &INTERRUPT_CORE0.CPU_INT_ENABLE.raw;
+            const typ = &INTERRUPT_CORE0.CPU_INT_TYPE.raw;
+            const clear = &INTERRUPT_CORE0.CPU_INT_CLEAR.raw;
+            const pending = &INTERRUPT_CORE0.CPU_INT_EIP_STATUS.raw;
+            const pri0: *volatile u32 = @ptrCast(&INTERRUPT_CORE0.CPU_INT_PRI_0);
+            const thresh: *volatile u32 = @ptrCast(&INTERRUPT_CORE0.CPU_INT_THRESH);
+        },
+        .esp32_c6 => struct {
+            const PLIC_MX = microzig.chip.peripherals.PLIC_MX;
+            const enable = &PLIC_MX.MXINT_ENABLE.raw;
+            const typ = &PLIC_MX.MXINT_TYPE.raw;
+            const clear = &PLIC_MX.MXINT_CLEAR.raw;
+            const pending = &PLIC_MX.EMIP_STATUS.raw;
+            const pri0: *volatile u32 = @ptrCast(&PLIC_MX.MXINT0_PRI);
+            const thresh: *volatile u32 = @ptrCast(&PLIC_MX.MXINT_THRESH);
+        },
+    };
+
     pub fn is_enabled(int: Interrupt) bool {
-        return INTERRUPT_CORE0.CPU_INT_ENABLE.raw & (@as(u32, 1) << @backingInt(int)) != 0;
+        return ctrl.enable.* & (@as(u32, 1) << @backingInt(int)) != 0;
+    }
+
+    /// CPU interrupt lines that must not be used. On the ESP32-C6 (PLIC) lines 3, 4 and 7
+    /// overlap with CLINT interrupts.
+    pub const reserved: []const Interrupt = switch (cpu_config.chip) {
+        .esp32_c3 => &.{},
+        .esp32_c6 => &.{ .interrupt3, .interrupt4, .interrupt7 },
+    };
+
+    pub fn is_reserved(int: Interrupt) bool {
+        return std.mem.indexOfScalar(Interrupt, reserved, int) != null;
     }
 
     pub fn enable(int: Interrupt) void {
-        INTERRUPT_CORE0.CPU_INT_ENABLE.raw |= @as(u32, 1) << @backingInt(int);
+        std.debug.assert(!is_reserved(int));
+        ctrl.enable.* |= @as(u32, 1) << @backingInt(int);
     }
 
     pub fn disable(int: Interrupt) void {
-        INTERRUPT_CORE0.CPU_INT_ENABLE.raw &= ~(@as(u32, 1) << @backingInt(int));
+        ctrl.enable.* &= ~(@as(u32, 1) << @backingInt(int));
     }
 
     /// Checks if a given interrupt is pending.
     pub fn is_pending(int: Interrupt) bool {
-        return INTERRUPT_CORE0.CPU_INT_EIP_STATUS.raw & (@as(u32, 1) << @backingInt(int)) != 0;
+        return ctrl.pending.* & (@as(u32, 1) << @backingInt(int)) != 0;
     }
 
     /// Clears the pending state of claimed (executing) edge-type interrupt only.
     /// NOTE: Pending state of an unclaimed (not executing) edge type interrupt can be flushed,
     /// if required, by first disabling it and only then call clearing it.
     pub fn clear_pending(int: Interrupt) void {
-        INTERRUPT_CORE0.CPU_INT_CLEAR.raw |= @as(u32, 1) << @backingInt(int);
+        ctrl.clear.* |= @as(u32, 1) << @backingInt(int);
     }
 
     pub const Priority = enum(u4) {
@@ -135,20 +169,18 @@ pub const interrupt = struct {
     }
 
     fn get_priority_register_for(int: Interrupt) *volatile u32 {
-        const base: [*]volatile u32 = @ptrCast(&INTERRUPT_CORE0.CPU_INT_PRI_0);
+        const base: [*]volatile u32 = @ptrCast(ctrl.pri0);
         return &base[@backingInt(int)];
     }
 
     /// Set threshold for interrupt assertion. Only when the interrupt priority is equal to or
     /// higher than this threshold, the cpu will respond to this interrupt.
     pub fn set_priority_threshold(priority: Priority) void {
-        INTERRUPT_CORE0.CPU_INT_THRESH.write(.{
-            .CPU_INT_THRESH = @backingInt(priority),
-        });
+        ctrl.thresh.* = @backingInt(priority);
     }
 
     pub fn get_priority_threshold() Priority {
-        return @fromBackingInt(INTERRUPT_CORE0.CPU_INT_THRESH.read().CPU_INT_THRESH);
+        return @fromBackingInt(@truncate(ctrl.thresh.*));
     }
 
     pub const Type = enum(u1) {
@@ -159,17 +191,17 @@ pub const interrupt = struct {
     pub fn set_type(int: Interrupt, typ: Type) void {
         const num = @backingInt(int);
         switch (typ) {
-            .level => INTERRUPT_CORE0.CPU_INT_TYPE.raw &= ~(@as(u32, 1) << num),
-            .edge => INTERRUPT_CORE0.CPU_INT_TYPE.raw |= @as(u32, 1) << num,
+            .level => ctrl.typ.* &= ~(@as(u32, 1) << num),
+            .edge => ctrl.typ.* |= @as(u32, 1) << num,
         }
     }
 
     pub fn get_type(int: Interrupt) Type {
         const num = @backingInt(int);
-        return @fromBackingInt(@truncate((INTERRUPT_CORE0.CPU_INT_TYPE.raw >> num) & 1));
+        return @fromBackingInt(@truncate((ctrl.typ.* >> num) & 1));
     }
 
-    pub const Source = enum(u6) {
+    const Source_C3 = enum(u6) {
         wifi_mac = 0,
         wifi_mac_nmi = 1,
         wifi_pwr = 2,
@@ -234,6 +266,94 @@ pub const interrupt = struct {
         cache_core0_acs = 61,
     };
 
+    /// Values from the ESP32-C6 SVD `<interrupt>` entries (match ESP-IDF soc/interrupts.h).
+    const Source_C6 = enum(u7) {
+        wifi_mac = 0,
+        wifi_mac_nmi = 1,
+        wifi_pwr = 2,
+        wifi_bb = 3,
+        bt_mac = 4,
+        bt_bb = 5,
+        bt_bb_nmi = 6,
+        lp_timer = 7,
+        coex = 8,
+        ble_timer = 9,
+        ble_sec = 10,
+        i2c_master = 11,
+        zb_mac = 12,
+        pmu = 13,
+        efuse = 14,
+        lp_rtc_timer = 15,
+        lp_uart = 16,
+        lp_i2c = 17,
+        lp_wdt = 18,
+        lp_peri_timeout = 19,
+        lp_apm_m0 = 20,
+        lp_apm_m1 = 21,
+        from_cpu_intr0 = 22,
+        from_cpu_intr1 = 23,
+        from_cpu_intr2 = 24,
+        from_cpu_intr3 = 25,
+        assist_debug = 26,
+        trace = 27,
+        cache = 28,
+        cpu_peri_timeout = 29,
+        gpio = 30,
+        gpio_nmi = 31,
+        pau = 32,
+        hp_peri_timeout = 33,
+        modem_peri_timeout = 34,
+        hp_apm_m0 = 35,
+        hp_apm_m1 = 36,
+        hp_apm_m2 = 37,
+        hp_apm_m3 = 38,
+        lp_apm0 = 39,
+        mspi = 40,
+        i2s0 = 41,
+        uhci0 = 42,
+        uart0 = 43,
+        uart1 = 44,
+        ledc = 45,
+        twai0 = 46,
+        twai1 = 47,
+        usb_device = 48,
+        rmt = 49,
+        i2c_ext0 = 50,
+        tg0_t0_level = 51,
+        tg0_t1_level = 52,
+        tg0_wdt_level = 53,
+        tg1_t0_level = 54,
+        tg1_t1_level = 55,
+        tg1_wdt_level = 56,
+        systimer_target0 = 57,
+        systimer_target1 = 58,
+        systimer_target2 = 59,
+        apb_adc = 60,
+        mcpwm0 = 61,
+        pcnt = 62,
+        parl_io = 63,
+        slc0 = 64,
+        slc1 = 65,
+        dma_in_ch0 = 66,
+        dma_in_ch1 = 67,
+        dma_in_ch2 = 68,
+        dma_out_ch0 = 69,
+        dma_out_ch1 = 70,
+        dma_out_ch2 = 71,
+        spi2 = 72,
+        aes = 73,
+        sha = 74,
+        rsa = 75,
+        ecc = 76,
+    };
+
+    pub const Source = switch (cpu_config.chip) {
+        .esp32_c3 => Source_C3,
+        .esp32_c6 => Source_C6,
+    };
+
+    const source_count = std.enums.values(Source).len;
+
     pub fn map(source: Source, maybe_int: ?Interrupt) void {
         get_source_map_register_for(source).* = if (maybe_int) |int| @backingInt(int) else 0;
     }
@@ -248,23 +368,32 @@ pub const interrupt = struct {
     }
 
     fn get_source_map_register_for(source: Source) *volatile u32 {
-        // using MAC_INTR_MAP here as it's the first map register.
-        const base: usize = @intFromPtr(&INTERRUPT_CORE0.MAC_INTR_MAP);
+        // first source map register of the interrupt matrix
+        const base: usize = switch (cpu_config.chip) {
+            .esp32_c3 => @intFromPtr(&INTERRUPT_CORE0.MAC_INTR_MAP),
+            .esp32_c6 => @intFromPtr(&INTERRUPT_CORE0.CORE_0_INTR_MAP0),
+        };
         return @ptrFromInt(base + @sizeOf(u32) * @as(usize, @backingInt(source)));
     }
 
     pub const Status = struct {
-        reg: u61,
+        const Reg = @Int(.unsigned, source_count);
+        reg: Reg,
 
         pub fn init() Status {
             return .{
-                .reg = INTERRUPT_CORE0.INTR_STATUS_REG_0.raw |
-                    (@as(u61, INTERRUPT_CORE0.INTR_STATUS_REG_1.raw) << 32),
+                .reg = switch (cpu_config.chip) {
+                    .esp32_c3 => @truncate(@as(u64, INTERRUPT_CORE0.INTR_STATUS_REG_0.raw) |
+                        (@as(u64, INTERRUPT_CORE0.INTR_STATUS_REG_1.raw) << 32)),
+                    .esp32_c6 => @truncate(@as(u96, INTERRUPT_CORE0.CORE_0_INTR_STATUS0.raw) |
+                        (@as(u96, INTERRUPT_CORE0.CORE_0_INTR_STATUS1.raw) << 32) |
+                        (@as(u96, INTERRUPT_CORE0.CORE_0_INTR_STATUS2.raw) << 64)),
+                },
             };
         }
 
         pub fn is_set(status: Status, source: Source) bool {
-            return status.reg & (@as(u61, 1) << @backingInt(source)) != 0;
+            return status.reg & (@as(Reg, 1) << @intCast(@backingInt(source))) != 0;
         }
     };
 
@@ -366,6 +495,7 @@ fn init_interrupts() void {
     interrupt.set_priority_threshold(.zero);
 
     for (std.enums.values(Interrupt)) |int| {
+        if (interrupt.is_reserved(int)) continue;
         interrupt.set_type(int, .level);
         interrupt.set_priority(int, .lowest);
         interrupt.disable(int);

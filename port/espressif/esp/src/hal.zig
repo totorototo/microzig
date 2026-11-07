@@ -60,6 +60,9 @@ pub fn init_sequence(clock_cfg: clocks.Config) void {
     // TODO: disable watchdogs in a more elegant way (with a hal).
     disable_watchdogs();
 
+    if (compatibility.chip == .esp32_c6)
+        disable_access_permission_filters_c6();
+
     clock_cfg.apply();
 
     system.init();
@@ -70,8 +73,50 @@ pub fn init_sequence(clock_cfg: clocks.Config) void {
         rtos.init();
 }
 
-// NOTE: might be esp32c3 specific only + temporary until timers hal.
+// NOTE: temporary until timers hal.
 fn disable_watchdogs() void {
+    switch (compatibility.chip) {
+        .esp32_c3 => disable_watchdogs_c3(),
+        .esp32_c6 => disable_watchdogs_c6(),
+    }
+}
+
+fn disable_watchdogs_c6() void {
+    const peripherals = microzig.chip.peripherals;
+    const TIMG0 = peripherals.TIMG0;
+    const TIMG1 = peripherals.TIMG1;
+    const LP_WDT = peripherals.LP_WDT;
+
+    // On the C6 the same key unlocks the main, RTC and super watchdogs.
+    const wkey = 0x50D83AA1;
+
+    inline for (.{ TIMG0, TIMG1 }) |timg| {
+        timg.WDTWPROTECT.raw = wkey;
+        timg.WDTCONFIG0.raw = 0;
+        timg.WDTWPROTECT.raw = 0;
+    }
+
+    LP_WDT.WDTWPROTECT.raw = wkey;
+    LP_WDT.WDTCONFIG0.raw = 0;
+    LP_WDT.WDTWPROTECT.raw = 0;
+
+    // The super watchdog has no disable bit on the C6: enable auto-feed instead.
+    LP_WDT.SWD_WPROTECT.raw = wkey;
+    LP_WDT.SWD_CONF.modify(.{ .SWD_AUTO_FEED_EN = 1 });
+    LP_WDT.SWD_WPROTECT.raw = 0;
+}
+
+/// All bus masters except the HP CPU boot in REE mode, and the default access path
+/// filters only allow TEE masters. Open them, like ESP-IDF and esp-hal do at startup,
+/// so DMA and the LP core can reach memory and peripherals.
+fn disable_access_permission_filters_c6() void {
+    const peripherals = microzig.chip.peripherals;
+    peripherals.LP_APM.FUNC_CTRL.raw = 0;
+    peripherals.LP_APM0.FUNC_CTRL.raw = 0;
+    peripherals.HP_APM.FUNC_CTRL.raw = 0;
+}
+
+fn disable_watchdogs_c3() void {
     const peripherals = microzig.chip.peripherals;
     const TIMG0 = peripherals.TIMG0;
     const RTC_CNTL = peripherals.RTC_CNTL;

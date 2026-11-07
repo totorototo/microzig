@@ -8,6 +8,7 @@ chips: struct {
     esp32_c3: *const microzig.Target,
     esp32_c3_direct_boot: *const microzig.Target,
     esp32_c3_flashless: *const microzig.Target,
+    esp32_c6: *const microzig.Target,
 },
 
 boards: struct {},
@@ -52,7 +53,7 @@ pub fn init(dep: *std.Build.Dependency) ?Self {
             .imports = b.allocator.dupe(Import, &.{
                 .{
                     .name = "cpu-config",
-                    .module = get_cpu_config(b, .image),
+                    .module = get_cpu_config(b, .image, .esp32_c3),
                 },
                 .{
                     .name = "riscv32-common",
@@ -99,6 +100,89 @@ pub fn init(dep: *std.Build.Dependency) ?Self {
         },
     };
 
+
+    const esp32_c6_zig_target: std.Target.Query = .{
+        .cpu_arch = .riscv32,
+        .cpu_model = .{ .explicit = &std.Target.riscv.cpu.generic_rv32 },
+        // RV32IMAC: unlike the C3, the C6 has the atomic extension.
+        .cpu_features_add = std.Target.riscv.featureSet(&.{
+            .a,
+            .c,
+            .m,
+            .zicsr,
+            .zifencei,
+        }),
+        .os_tag = .freestanding,
+        .abi = .eabi,
+    };
+
+    const esp32_c6_wifi_driver_mod = make_esp_wifi_driver_module(b, esp_wifi_sys_dep, "esp32c6", esp32_c6_zig_target);
+
+    const chip_esp32_c6: microzig.Target = .{
+        .dep = dep,
+        .preferred_binary_format = .{ .esp = .{
+            .chip_id = .esp32_c6,
+            .flash_mode = .dio,
+            .flash_size = .@"4mb",
+            .flash_freq = .@"40m",
+        } },
+        .zig_target = esp32_c6_zig_target,
+        .cpu = .{
+            .name = "esp_riscv",
+            .root_source_file = b.path("src/cpus/esp_riscv.zig"),
+            .imports = b.allocator.dupe(Import, &.{
+                .{
+                    .name = "cpu-config",
+                    .module = get_cpu_config(b, .image, .esp32_c6),
+                },
+                .{
+                    .name = "riscv32-common",
+                    .module = riscv32_common_mod,
+                },
+            }) catch @panic("OOM"),
+        },
+        .chip = .{
+            .name = "ESP32-C6",
+            .url = "https://www.espressif.com/en/products/socs/esp32-c6",
+            // Generated from esp-pacs, see src/chips/prep_esp32c6_svd.py
+            .register_definition = .{ .svd = b.path("src/chips/ESP32-C6.svd") },
+            .memory_regions = &.{
+                // Unified I/D flash MMU window. The 2nd stage bootloader only accepts
+                // SOC_IROM_LOW..SOC_IROM_HIGH (== SOC_DROM_*), whose end depends on the MMU
+                // page size, so rodata and text both stay in the low 8 MiB.
+                .{ .name = "FLASH", .offset = 0x4200_0000, .length = 0x0080_0000, .access = .rx },
+                // Unified HP SRAM. Ends where the 2nd stage bootloader's iram_loader_seg starts
+                // (0x4086_E610), so loading the app doesn't overwrite the running bootloader.
+                .{ .name = "RAM", .tag = .ram, .offset = 0x4080_0000, .length = 0x6_E610, .access = .rwx },
+            },
+        },
+        .hal = .{
+            .root_source_file = b.path("src/hal.zig"),
+            .imports = b.allocator.dupe(std.Build.Module.Import, &.{
+                .{
+                    .name = "esp_image",
+                    .module = esp_image_mod,
+                },
+                .{
+                    .name = "esp-wifi-driver",
+                    .module = esp32_c6_wifi_driver_mod,
+                },
+            }) catch @panic("OOM"),
+        },
+        .linker_script = .{
+            .generate = .memory_regions,
+            .file = generate_linker_script(
+                dep,
+                "final.ld",
+                &.{
+                    b.path("ld/esp32_c6/image_boot_sections.ld"),
+                    b.path("ld/esp32_c6/common_sections.ld"),
+                    b.path("ld/esp32_c6/rom_functions.ld"),
+                },
+            ),
+        },
+    };
+
     return .{
         .chips = .{
             .esp32_c3 = chip_esp32_c3.derive(.{}),
@@ -110,7 +194,7 @@ pub fn init(dep: *std.Build.Dependency) ?Self {
                     .imports = b.allocator.dupe(Import, &.{
                         .{
                             .name = "cpu-config",
-                            .module = get_cpu_config(b, .direct),
+                            .module = get_cpu_config(b, .direct, .esp32_c3),
                         },
                         .{
                             .name = "riscv32-common",
@@ -146,6 +230,7 @@ pub fn init(dep: *std.Build.Dependency) ?Self {
                     ),
                 },
             }),
+            .esp32_c6 = chip_esp32_c6.derive(.{}),
         },
         .boards = .{},
     };
@@ -183,9 +268,15 @@ const BootMode = enum {
     image,
 };
 
-fn get_cpu_config(b: *std.Build, boot_mode: BootMode) *std.Build.Module {
+const Chip = enum {
+    esp32_c3,
+    esp32_c6,
+};
+
+fn get_cpu_config(b: *std.Build, boot_mode: BootMode, chip: Chip) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(BootMode, "boot_mode", boot_mode);
+    options.addOption(Chip, "chip", chip);
     return b.createModule(.{
         .root_source_file = options.getOutput(),
     });
@@ -212,10 +303,10 @@ fn make_esp_wifi_driver_module(
     chip_name: []const u8,
     target_query: std.Target.Query,
 ) *std.Build.Module {
-    const esp32_c3_resolved_zig_target = b.resolveTargetQuery(target_query);
+    const resolved_zig_target = b.resolveTargetQuery(target_query);
     const translate_c = b.addTranslateC(.{
         .root_source_file = esp_wifi_sys_dep.path("c/include/include.h"),
-        .target = esp32_c3_resolved_zig_target,
+        .target = resolved_zig_target,
         .optimize = .Debug,
         .link_libc = false,
     });
@@ -226,12 +317,14 @@ fn make_esp_wifi_driver_module(
     translate_c.addIncludePath(esp_wifi_sys_dep.path(b.fmt("c/include/{s}", .{chip_name})));
     translate_c.addIncludePath(esp_wifi_sys_dep.path(b.fmt("c/headers/{s}", .{chip_name})));
 
-    const mod = translate_c.addModule("esp-wifi-driver");
+    const mod = translate_c.createModule();
     mod.addLibraryPath(esp_wifi_sys_dep.path(b.fmt("esp-wifi-sys-{s}/libs", .{chip_name})));
+
+    // The BLE controller blob is btdm_app on the C3 and ble_app on the C6.
+    mod.linkSystemLibrary(if (std.mem.eql(u8, chip_name, "esp32c6")) "ble_app" else "btdm_app", .{});
 
     inline for (&.{
         "btbb",
-        "btdm_app",
         "coexist",
         "core",
         "espnow",

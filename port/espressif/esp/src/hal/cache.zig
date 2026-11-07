@@ -1,5 +1,4 @@
 const microzig = @import("microzig");
-const EXTMEM = microzig.chip.peripherals.EXTMEM;
 
 const compatibility = @import("compatibility.zig");
 const rom = @import("rom.zig");
@@ -7,6 +6,7 @@ const rom = @import("rom.zig");
 pub fn init() void {
     switch (compatibility.chip) {
         .esp32_c3 => {
+            const EXTMEM = microzig.chip.peripherals.EXTMEM;
             const CACHE_LL_L1_ICACHE_AUTOLOAD = 1 << 2;
 
             rom.functions.Cache_Enable_ICache(if (EXTMEM.ICACHE_AUTOLOAD_CTRL.read().ICACHE_AUTOLOAD_ENA != 0)
@@ -19,5 +19,7 @@ pub fn init() void {
                 .ICACHE_SHUT_DBUS = 0,
             });
         },
+        // The 2nd stage bootloader leaves the unified cache enabled with the app mapped.
+        .esp32_c6 => {},
     }
 }

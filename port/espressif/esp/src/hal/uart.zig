@@ -2,7 +2,7 @@ const std = @import("std");
 const microzig = @import("microzig");
 const peripherals = microzig.chip.peripherals;
 
-// TODO: chip independent. currently specific to esp32c3.
+// Register layout is the same on the ESP32-C3 and ESP32-C6.
 
 fn reg(comptime index: comptime_int) @TypeOf(@field(peripherals, std.fmt.comptimePrint("UART{}", .{index}))) {
     return @field(peripherals, std.fmt.comptimePrint("UART{}", .{index}));

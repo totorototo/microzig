@@ -1,16 +1,30 @@
 //! GPIO and pin configuration
 //!
-//! The ESP32c3's GPIO matrix and IO mux allows input from any pin to be routed to any peripheral,
+//! The GPIO matrix and IO mux allow input from any pin to be routed to any peripheral,
 //! and any peripheral output to be routed to any pin.
 //!
-//! See section 5 of the Technical Reference Manual
+//! See the "IO MUX and GPIO Matrix" chapter of the Technical Reference Manual:
 //! https://www.espressif.com/sites/default/files/documentation/esp32-c3_technical_reference_manual_en.pdf
+//! https://www.espressif.com/sites/default/files/documentation/esp32-c6_technical_reference_manual_en.pdf
 //!
 const std = @import("std");
 const microzig = @import("microzig");
 const peripherals = microzig.chip.peripherals;
 const IO_MUX = peripherals.IO_MUX;
 const GPIO = peripherals.GPIO;
+const compatibility = @import("compatibility.zig");
+
+/// Number of GPIO pins on this chip.
+pub const pin_count = switch (compatibility.chip) {
+    .esp32_c3 => 22,
+    .esp32_c6 => 31,
+};
+
+/// Pins shared with the USB-Serial-JTAG peripheral (D-, D+).
+const usb_pins: [2]u5 = switch (compatibility.chip) {
+    .esp32_c3 => .{ 18, 19 },
+    .esp32_c6 => .{ 12, 13 },
+};
 
 pub const DriveStrength = enum {
     @"5mA",
@@ -21,6 +35,9 @@ pub const DriveStrength = enum {
     /// Get the appropriate value of DriveStrength based on the pin number.
     /// See section 5.15.2 (IO MUX Registers) of the Technical Reference Manual
     fn to_value(strength: DriveStrength, pin: Pin) u2 {
+        // The swapped encoding is an ESP32-C3 quirk; the C6 uses the plain encoding on every pin.
+        if (compatibility.chip != .esp32_c3) return @backingInt(strength);
+
         return switch (@backingInt(pin)) {
             2, 3, 5, 18, 19 => switch (strength) {
                 .@"5mA" => 0,
@@ -55,7 +72,7 @@ pub const Event = enum(u3) {
     high_level = 5,
 };
 
-pub const InputSignal = enum(u8) {
+const InputSignal_C3 = enum(u8) {
     spiq = 0,
     spid = 1,
     spihd = 2,
@@ -113,7 +130,7 @@ pub const InputSignal = enum(u8) {
     pub const always_high: InputSignal = .cpu_gpio2;
 };
 
-pub const OutputSignal = enum(u8) {
+const OutputSignal_C3 = enum(u8) {
     spiq = 0,
     spid = 1,
     spihd = 2,
@@ -206,18 +223,243 @@ pub const OutputSignal = enum(u8) {
     gpio = 128,
 };
 
+pub const InputSignal = switch (compatibility.chip) {
+    .esp32_c3 => InputSignal_C3,
+    .esp32_c6 => InputSignal_C6,
+};
+
+pub const OutputSignal = switch (compatibility.chip) {
+    .esp32_c3 => OutputSignal_C3,
+    .esp32_c6 => OutputSignal_C6,
+};
+
+// ESP32-C6 GPIO matrix signals. Generated from esp-hal esp-metadata/devices/esp32c6/gpio.toml
+// (which mirrors ESP-IDF soc/esp32c6/include/soc/gpio_sig_map.h). IO MUX-only functions are omitted.
+const InputSignal_C6 = enum(u8) {
+    ext_adc_start = 0,
+    u0rxd = 6,
+    u0cts = 7,
+    u0dsr = 8,
+    u1rxd = 9,
+    u1cts = 10,
+    u1dsr = 11,
+    i2s_mclk = 12,
+    i2so_bck = 13,
+    i2so_ws = 14,
+    i2si_sd = 15,
+    i2si_bck = 16,
+    i2si_ws = 17,
+    usb_jtag_tdo_bridge = 19,
+    cpu_testbus0 = 20,
+    cpu_testbus1 = 21,
+    cpu_testbus2 = 22,
+    cpu_testbus3 = 23,
+    cpu_testbus4 = 24,
+    cpu_testbus5 = 25,
+    cpu_testbus6 = 26,
+    cpu_testbus7 = 27,
+    cpu_gpio_0 = 28,
+    cpu_gpio_1 = 29,
+    cpu_gpio_2 = 30,
+    cpu_gpio_3 = 31,
+    cpu_gpio_4 = 32,
+    cpu_gpio_5 = 33,
+    cpu_gpio_6 = 34,
+    cpu_gpio_7 = 35,
+    usb_jtag_tms = 37,
+    usb_extphy_oen = 40,
+    usb_extphy_vm = 41,
+    usb_extphy_vpo = 42,
+    i2cext0_scl = 45,
+    i2cext0_sda = 46,
+    parl_rx_data0 = 47,
+    parl_rx_data1 = 48,
+    parl_rx_data2 = 49,
+    parl_rx_data3 = 50,
+    parl_rx_data4 = 51,
+    parl_rx_data5 = 52,
+    parl_rx_data6 = 53,
+    parl_rx_data7 = 54,
+    parl_rx_data8 = 55,
+    parl_rx_data9 = 56,
+    parl_rx_data10 = 57,
+    parl_rx_data11 = 58,
+    parl_rx_data12 = 59,
+    parl_rx_data13 = 60,
+    parl_rx_data14 = 61,
+    parl_rx_data15 = 62,
+    fspiclk = 63,
+    fspiq = 64,
+    fspid = 65,
+    fspihd = 66,
+    fspiwp = 67,
+    fspics0 = 68,
+    parl_rx_clk = 69,
+    parl_tx_clk = 70,
+    rmt_sig_0 = 71,
+    rmt_sig_1 = 72,
+    twai0_rx = 73,
+    twai1_rx = 77,
+    pwm0_sync0 = 87,
+    pwm0_sync1 = 88,
+    pwm0_sync2 = 89,
+    pwm0_f0 = 90,
+    pwm0_f1 = 91,
+    pwm0_f2 = 92,
+    pwm0_cap0 = 93,
+    pwm0_cap1 = 94,
+    pwm0_cap2 = 95,
+    sig_in_func97 = 97,
+    sig_in_func98 = 98,
+    sig_in_func99 = 99,
+    sig_in_func100 = 100,
+    pcnt0_sig_ch0 = 101,
+    pcnt0_sig_ch1 = 102,
+    pcnt0_ctrl_ch0 = 103,
+    pcnt0_ctrl_ch1 = 104,
+    pcnt1_sig_ch0 = 105,
+    pcnt1_sig_ch1 = 106,
+    pcnt1_ctrl_ch0 = 107,
+    pcnt1_ctrl_ch1 = 108,
+    pcnt2_sig_ch0 = 109,
+    pcnt2_sig_ch1 = 110,
+    pcnt2_ctrl_ch0 = 111,
+    pcnt2_ctrl_ch1 = 112,
+    pcnt3_sig_ch0 = 113,
+    pcnt3_sig_ch1 = 114,
+    pcnt3_ctrl_ch0 = 115,
+    pcnt3_ctrl_ch1 = 116,
+    spiq = 121,
+    spid = 122,
+    spihd = 123,
+    spiwp = 124,
+};
+
+const OutputSignal_C6 = enum(u8) {
+    ledc_ls_sig0 = 0,
+    ledc_ls_sig1 = 1,
+    ledc_ls_sig2 = 2,
+    ledc_ls_sig3 = 3,
+    ledc_ls_sig4 = 4,
+    ledc_ls_sig5 = 5,
+    u0txd = 6,
+    u0rts = 7,
+    u0dtr = 8,
+    u1txd = 9,
+    u1rts = 10,
+    u1dtr = 11,
+    i2s_mclk = 12,
+    i2so_bck = 13,
+    i2so_ws = 14,
+    i2so_sd = 15,
+    i2si_bck = 16,
+    i2si_ws = 17,
+    i2so_sd1 = 18,
+    usb_jtag_tdo_bridge = 19,
+    cpu_testbus0 = 20,
+    cpu_testbus1 = 21,
+    cpu_testbus2 = 22,
+    cpu_testbus3 = 23,
+    cpu_testbus4 = 24,
+    cpu_testbus5 = 25,
+    cpu_testbus6 = 26,
+    cpu_testbus7 = 27,
+    cpu_gpio_0 = 28,
+    cpu_gpio_1 = 29,
+    cpu_gpio_2 = 30,
+    cpu_gpio_3 = 31,
+    cpu_gpio_4 = 32,
+    cpu_gpio_5 = 33,
+    cpu_gpio_6 = 34,
+    cpu_gpio_7 = 35,
+    usb_jtag_tck = 36,
+    usb_jtag_tms = 37,
+    usb_jtag_tdi = 38,
+    usb_jtag_tdo = 39,
+    i2cext0_scl = 45,
+    i2cext0_sda = 46,
+    parl_tx_data0 = 47,
+    parl_tx_data1 = 48,
+    parl_tx_data2 = 49,
+    parl_tx_data3 = 50,
+    parl_tx_data4 = 51,
+    parl_tx_data5 = 52,
+    parl_tx_data6 = 53,
+    parl_tx_data7 = 54,
+    parl_tx_data8 = 55,
+    parl_tx_data9 = 56,
+    parl_tx_data10 = 57,
+    parl_tx_data11 = 58,
+    parl_tx_data12 = 59,
+    parl_tx_data13 = 60,
+    parl_tx_data14 = 61,
+    parl_tx_data15 = 62,
+    fspiclk = 63,
+    fspiq = 64,
+    fspid = 65,
+    fspihd = 66,
+    fspiwp = 67,
+    fspics0 = 68,
+    sdio_tohost_int = 69,
+    parl_tx_clk = 70,
+    rmt_sig_0 = 71,
+    rmt_sig_1 = 72,
+    twai0_tx = 73,
+    twai0_bus_off_on = 74,
+    twai0_clkout = 75,
+    twai0_standby = 76,
+    twai1_tx = 77,
+    twai1_bus_off_on = 78,
+    twai1_clkout = 79,
+    twai1_standby = 80,
+    gpio_sd0 = 83,
+    gpio_sd1 = 84,
+    gpio_sd2 = 85,
+    gpio_sd3 = 86,
+    pwm0_0a = 87,
+    pwm0_0b = 88,
+    pwm0_1a = 89,
+    pwm0_1b = 90,
+    pwm0_2a = 91,
+    pwm0_2b = 92,
+    sig_in_func97 = 97,
+    sig_in_func98 = 98,
+    sig_in_func99 = 99,
+    sig_in_func100 = 100,
+    fspics1 = 101,
+    fspics2 = 102,
+    fspics3 = 103,
+    fspics4 = 104,
+    fspics5 = 105,
+    spiclk = 114,
+    spics0 = 115,
+    spics1 = 116,
+    gpio_task_matrix_out0 = 117,
+    gpio_task_matrix_out1 = 118,
+    gpio_task_matrix_out2 = 119,
+    gpio_task_matrix_out3 = 120,
+    spiq = 121,
+    spid = 122,
+    spihd = 123,
+    spiwp = 124,
+    clk_out_out1 = 125,
+    clk_out_out2 = 126,
+    clk_out_out3 = 127,
+    gpio = 128,
+};
+
 pub const Pull = enum {
     up,
     down,
     disabled,
 };
 
-pub const Mask = enum(u22) {
+pub const Mask = enum(@Int(.unsigned, pin_count)) {
     _,
 };
 
 pub fn num(n: u5) Pin {
-    std.debug.assert(n < 22);
+    std.debug.assert(n < pin_count);
     return @as(Pin, @fromBackingInt(n));
 }
 
@@ -242,9 +484,9 @@ pub const Pin = enum(u5) {
     fn assert_usb_disabled(self: Pin) void {
         const n = @backingInt(self);
 
-        // NOTE: Assert that the USB_SERIAL_JTAG peripheral which uses pins GPIO18 and GPIO19
+        // NOTE: Assert that the USB_SERIAL_JTAG peripheral which uses the USB pins
         //       is disabled and USB pullup/down resistors are disabled.
-        if (n == 18 or n == 19) {
+        if (n == usb_pins[0] or n == usb_pins[1]) {
             const usb_conf0 = peripherals.USB_DEVICE.CONF0.read();
             std.debug.assert(usb_conf0.USB_PAD_ENABLE == 0 and
                 usb_conf0.DP_PULLUP == 0 and
@@ -273,12 +515,12 @@ pub const Pin = enum(u5) {
             .FILTER_EN = @intFromBool(config.input_filter_enable),
         });
 
-        GPIO.PIN[n].modify(.{ .PIN_PAD_DRIVER = @intFromBool(config.open_drain) });
+        set_pad_driver(n, config.open_drain);
 
         if (config.output_enable) {
-            GPIO.ENABLE_W1TS.write(.{ .ENABLE_W1TS = @as(u26, 1) << n });
+            GPIO.ENABLE_W1TS.raw = @as(u32, 1) << n;
         } else {
-            GPIO.ENABLE_W1TC.write(.{ .ENABLE_W1TC = @as(u26, 1) << n });
+            GPIO.ENABLE_W1TC.raw = @as(u32, 1) << n;
         }
     }
 
@@ -320,9 +562,9 @@ pub const Pin = enum(u5) {
     pub fn set_output_enabled(self: Pin, enable: bool) void {
         const n = @backingInt(self);
         if (enable) {
-            GPIO.ENABLE_W1TS.write(.{ .ENABLE_W1TS = @as(u26, 1) << n });
+            GPIO.ENABLE_W1TS.raw = @as(u32, 1) << n;
         } else {
-            GPIO.ENABLE_W1TC.write(.{ .ENABLE_W1TC = @as(u26, 1) << n });
+            GPIO.ENABLE_W1TC.raw = @as(u32, 1) << n;
         }
     }
 
@@ -364,14 +606,18 @@ pub const Pin = enum(u5) {
     }
 
     pub fn set_open_drain(self: Pin, open_drain: bool) void {
-        GPIO.PIN[@backingInt(self)].modify(.{ .PIN_PAD_DRIVER = @intFromBool(open_drain) });
+        set_pad_driver(@backingInt(self), open_drain);
     }
 
     pub fn put(self: Pin, level: u1) void {
         const n = @backingInt(self);
         switch (level) {
-            0 => GPIO.OUT_W1TC.write(.{ .OUT_W1TC = @as(u26, 1) << n }),
-            1 => GPIO.OUT_W1TS.write(.{ .OUT_W1TS = @as(u26, 1) << n }),
+            0 => {
+                GPIO.OUT_W1TC.raw = @as(u32, 1) << n;
+            },
+            1 => {
+                GPIO.OUT_W1TS.raw = @as(u32, 1) << n;
+            },
         }
     }
 
@@ -388,3 +634,10 @@ pub const Pin = enum(u5) {
         }
     }
 };
+
+fn set_pad_driver(n: u5, open_drain: bool) void {
+    switch (compatibility.chip) {
+        .esp32_c3 => GPIO.PIN[n].modify(.{ .PIN_PAD_DRIVER = @intFromBool(open_drain) }),
+        .esp32_c6 => GPIO.PIN[n].modify(.{ .PAD_DRIVER = @intFromBool(open_drain) }),
+    }
+}

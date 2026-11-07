@@ -1,5 +1,6 @@
 const std = @import("std");
 const microzig = @import("microzig");
+const compatibility = @import("compatibility.zig");
 const mdf = microzig.drivers;
 const drivers = mdf.base;
 const peripherals = microzig.chip.peripherals;
@@ -9,7 +10,12 @@ const gpio = @import("gpio.zig");
 const time = @import("time.zig");
 
 // TODO: How and why. Is this xtal? That clock is 40_000_000 according to the hal
-const SOURCE_CLK_FREQ: u32 = 20_000_000;
+// ESP32-C6: XTAL selected in PCR.I2C0_SCLK_CONF.
+// ESP32-C3: kept as before (XTAL is 40 MHz there too; see note in set_frequency).
+const SOURCE_CLK_FREQ: u32 = switch (compatibility.chip) {
+    .esp32_c3 => 20_000_000,
+    .esp32_c6 => 40_000_000,
+};
 
 pub const ConfigError = error{
     InvalidClkConfig,
@@ -155,12 +161,16 @@ pub const I2C = struct {
         regs.CTR.write_raw(0);
         regs.CTR.modify(.{
             .MS_MODE = 1, // Set I2C controller to master mode
-            .SDA_FORCE_OUT = 1, // Use open drain output for SDA
-            .SCL_FORCE_OUT = 1, // Use open drain output for SCL
             .TX_LSB_FIRST = 0, // MSB first for sending
             .RX_LSB_FIRST = 0, // MSB first for receiving
             .CLK_EN = 1, // Enable clock
         });
+        // SDA/SCL_FORCE_OUT = 1, as in ESP-IDF's i2c_ll_master_init on both chips. The C6 SVD
+        // labels 1 "direct output"; the open drain behaviour comes from the pad configuration.
+        switch (compatibility.chip) {
+            .esp32_c3 => regs.CTR.modify(.{ .SDA_FORCE_OUT = 1, .SCL_FORCE_OUT = 1 }),
+            .esp32_c6 => regs.CTR.modify(.{ .SDA_FORCE_OUT = .DirectOutput, .SCL_FORCE_OUT = .DirectOutput }),
+        }
 
         // Configure filter
         self.set_filter(7, 7);
@@ -223,10 +233,7 @@ pub const I2C = struct {
             .RX_FIFO_RST = 0,
         });
 
-        self.get_regs().INT_CLR.modify(.{
-            .RXFIFO_WM_INT_CLR = 1,
-            .TXFIFO_WM_INT_CLR = 1,
-        });
+        self.get_regs().INT_CLR.write_raw(int_bit("RXFIFO_WM") | int_bit("TXFIFO_WM"));
 
         self.update_config();
     }
@@ -273,10 +280,18 @@ pub const I2C = struct {
         const timeout: u5 = 10;
 
         // Set clock divider
-        self.get_regs().CLK_CONF.modify(.{
-            .SCLK_SEL = 0,
-            .SCLK_DIV_NUM = @as(u8, @truncate(sclk_div - 1)),
-        });
+        switch (compatibility.chip) {
+            .esp32_c3 => self.get_regs().CLK_CONF.modify(.{
+                .SCLK_SEL = 0,
+                .SCLK_DIV_NUM = @as(u8, @truncate(sclk_div - 1)),
+            }),
+            // The function clock source and divider moved to PCR on the C6.
+            .esp32_c6 => microzig.chip.peripherals.PCR.I2C0_SCLK_CONF.modify(.{
+                .I2C_SCLK_SEL = 0,
+                .I2C_SCLK_DIV_NUM = @as(u8, @truncate(sclk_div - 1)),
+                .I2C_SCLK_EN = 1,
+            }),
+        }
 
         // Set SCL period
         self.get_regs().SCL_LOW_PERIOD.modify(.{ .SCL_LOW_PERIOD = scl_low });
@@ -313,14 +328,14 @@ pub const I2C = struct {
         // Reset the peripheral in case of error
         errdefer self.reset_fsm() catch {};
 
-        const interrupts = self.get_regs().INT_RAW.read();
-        if (interrupts.TIME_OUT_INT_RAW == 1) {
+        const interrupts: IntRaw = .{ .raw = self.get_regs().INT_RAW.raw };
+        if (interrupts.is_set("TIME_OUT")) {
             return Error.Timeout;
-        } else if (interrupts.NACK_INT_RAW == 1) {
+        } else if (interrupts.is_set("NACK")) {
             return Error.NoAcknowledge;
-        } else if (interrupts.ARBITRATION_LOST_INT_RAW == 1) {
+        } else if (interrupts.is_set("ARBITRATION_LOST")) {
             return Error.ArbitrationLost;
-        } else if (interrupts.TRANS_COMPLETE_INT_RAW == 1 and self.get_regs().SR.read().RESP_REC == 0) {
+        } else if (interrupts.is_set("TRANS_COMPLETE") and self.get_regs().SR.read().RESP_REC == 0) {
             return Error.NoAcknowledge;
         }
     }
@@ -353,10 +368,9 @@ pub const I2C = struct {
         if (cmd_start_idx.* + 1 > self.get_regs().COMD.len)
             return Error.CommandNumberExceeded;
 
-        self.get_regs().COMD[cmd_start_idx.*].write(.{
-            .COMMAND = cmd.to_value(),
-            .COMMAND_DONE = 0,
-        });
+        // Raw write: same bit layout on all chips (opcode at bit 11, COMMAND_DONE at bit 31),
+        // but the C3 SVD has one COMMAND field and the C6 SVD splits it.
+        self.get_regs().COMD[cmd_start_idx.*].write_raw(cmd.to_value());
         cmd_start_idx.* += 1;
     }
 
@@ -462,13 +476,13 @@ pub const I2C = struct {
     fn wait_for_completion(self: I2C, deadline: mdf.time.Deadline) !void {
         // Monitor for completion or errors
         while (true) {
-            const interrupts = self.get_regs().INT_RAW.read();
+            const interrupts: IntRaw = .{ .raw = self.get_regs().INT_RAW.raw };
 
             // Check for errors
             try self.check_errors();
 
             // Check for completion
-            if (interrupts.TRANS_COMPLETE_INT_RAW == 1 or interrupts.END_DETECT_INT_RAW == 1)
+            if (interrupts.is_set("TRANS_COMPLETE") or interrupts.is_set("END_DETECT"))
                 break;
 
             // Check for timeout
@@ -480,8 +494,10 @@ pub const I2C = struct {
 
         // Verify all commands were executed
         for (0..self.get_regs().COMD.len) |i| {
-            const cmd = self.get_regs().COMD[i].read();
-            if (cmd.COMMAND != 0 and cmd.COMMAND_DONE == 0) {
+            const cmd = self.get_regs().COMD[i].raw;
+            const command: u14 = @truncate(cmd);
+            const command_done = cmd >> 31;
+            if (command != 0 and command_done == 0) {
                 return Error.ExecutionIncomplete;
             }
         }
@@ -656,5 +672,24 @@ pub const I2C = struct {
         self.start_transmission();
 
         try self.wait_for_completion(deadline);
+    }
+};
+
+/// Interrupt flag bit positions are the same on every chip, but the generated field names
+/// differ (`NACK_INT_RAW` on the C3, `NACK` on the C6).
+fn int_bit(comptime name: []const u8) u32 {
+    const T = @TypeOf(I2C0.INT_RAW.read());
+    const field = switch (compatibility.chip) {
+        .esp32_c3 => name ++ "_INT_RAW",
+        .esp32_c6 => name,
+    };
+    return @as(u32, 1) << @bitOffsetOf(T, field);
+}
+
+const IntRaw = struct {
+    raw: u32,
+
+    fn is_set(self: IntRaw, comptime name: []const u8) bool {
+        return self.raw & int_bit(name) != 0;
     }
 };

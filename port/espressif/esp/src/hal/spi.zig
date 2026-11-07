@@ -1,5 +1,6 @@
 const std = @import("std");
 const microzig = @import("microzig");
+const compatibility = @import("compatibility.zig");
 const SliceVector = microzig.utilities.SliceVector;
 
 const clocks = @import("clocks.zig");
@@ -37,7 +38,7 @@ pub const SPI = enum(u2) {
         bit_order: BitOrder = .msb_first,
 
         fn validate(self: Config) error{InvalidBaudRate}!void {
-            const source_freq = self.clock_config.apb_clk_freq;
+            const source_freq = self.source_clk_freq();
             const min_divider = 1;
             const max_divider = (std.math.maxInt(u6) + 1) * (std.math.maxInt(u4) + 1);
 
@@ -47,6 +48,14 @@ pub const SPI = enum(u2) {
         }
 
         // translated from esp-hal in rust
+        /// ESP32-C3: SPI2 runs from APB. ESP32-C6: PLL_F80M, selected in PCR at init.
+        fn source_clk_freq(self: Config) u32 {
+            return switch (compatibility.chip) {
+                .esp32_c3 => self.clock_config.apb_clk_freq,
+                .esp32_c6 => 80_000_000,
+            };
+        }
+
         fn get_clock_config(self: Config) u32 {
             // TODO: we can return directly the packed type if we add some patches
             // to regz (not possible rn).
@@ -59,7 +68,7 @@ pub const SPI = enum(u2) {
                 CLK_EQU_SYSCLK: u1,
             };
 
-            const source_freq = self.clock_config.apb_clk_freq;
+            const source_freq = self.source_clk_freq();
 
             // Use APB directly if target frequency is high enough
             if (self.baud_rate > ((source_freq / 4) * 3)) {
@@ -147,15 +156,25 @@ pub const SPI = enum(u2) {
 
         regs.SLAVE.write_raw(0);
 
+        if (compatibility.chip == .esp32_c6) {
+            microzig.chip.peripherals.PCR.SPI2_CLKM_CONF.modify(.{
+                .SPI2_CLKM_SEL = 1, // PLL_F80M
+                .SPI2_CLKM_EN = 1,
+            });
+        }
+
         regs.CLOCK.write_raw(config.get_clock_config());
 
-        regs.DMA_INT_CLR.modify(.{
-            .TRANS_DONE_INT_CLR = 1,
-        });
-
-        regs.DMA_INT_ENA.modify(.{
-            .TRANS_DONE_INT_ENA = 1,
-        });
+        switch (compatibility.chip) {
+            .esp32_c3 => {
+                regs.DMA_INT_CLR.modify(.{ .TRANS_DONE_INT_CLR = 1 });
+                regs.DMA_INT_ENA.modify(.{ .TRANS_DONE_INT_ENA = 1 });
+            },
+            .esp32_c6 => {
+                regs.DMA_INT_CLR.modify(.{ .TRANS_DONE = 1 });
+                regs.DMA_INT_ENA.modify(.{ .TRANS_DONE = 1 });
+            },
+        }
 
         self.set_bit_order(config.bit_order);
     }
@@ -435,9 +454,10 @@ pub const SPI = enum(u2) {
             .MS_DATA_BITLEN = @intCast(data_bitlen - 1),
         });
 
-        regs.DMA_INT_CLR.modify(.{
-            .TRANS_DONE_INT_CLR = 1,
-        });
+        switch (compatibility.chip) {
+            .esp32_c3 => regs.DMA_INT_CLR.modify(.{ .TRANS_DONE_INT_CLR = 1 }),
+            .esp32_c6 => regs.DMA_INT_CLR.modify(.{ .TRANS_DONE = 1 }),
+        }
 
         regs.DMA_CONF.modify(.{
             .RX_AFIFO_RST = 1,
@@ -458,6 +478,9 @@ pub const SPI = enum(u2) {
 
     fn wait_for_transfer_blocking(self: SPI) void {
         const regs = self.get_regs();
-        while (regs.DMA_INT_RAW.read().TRANS_DONE_INT_RAW != 1) {}
+        switch (compatibility.chip) {
+            .esp32_c3 => while (regs.DMA_INT_RAW.read().TRANS_DONE_INT_RAW != 1) {},
+            .esp32_c6 => while (regs.DMA_INT_RAW.read().TRANS_DONE != 1) {},
+        }
     }
 };

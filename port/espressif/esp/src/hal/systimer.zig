@@ -3,6 +3,7 @@ const microzig = @import("microzig");
 const SYSTIMER = microzig.chip.peripherals.SYSTIMER;
 
 const system = @import("system.zig");
+const compatibility = @import("compatibility.zig");
 
 pub fn ticks_per_us() u52 {
     return 16;
@@ -70,22 +71,40 @@ pub const Unit = enum(u1) {
     }
 
     pub fn write(self: Unit, value: u52) void {
-        const LOAD: @TypeOf(&SYSTIMER.UNIT0_LOAD) = switch (self) {
-            .unit0 => &SYSTIMER.UNIT0_LOAD,
-            .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD),
-        };
-        const LO: @TypeOf(&SYSTIMER.UNIT0_LOAD_LO) = switch (self) {
-            .unit0 => &SYSTIMER.UNIT0_LOAD_LO,
-            .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD_LO),
-        };
-        const HI: @TypeOf(&SYSTIMER.UNIT0_LOAD_HI) = switch (self) {
-            .unit0 => &SYSTIMER.UNIT0_LOAD_HI,
-            .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD_HI),
-        };
+        switch (compatibility.chip) {
+            .esp32_c3 => {
+                const LOAD: @TypeOf(&SYSTIMER.UNIT0_LOAD) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_LOAD,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD),
+                };
+                const LO: @TypeOf(&SYSTIMER.UNIT0_LOAD_LO) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_LOAD_LO,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD_LO),
+                };
+                const HI: @TypeOf(&SYSTIMER.UNIT0_LOAD_HI) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_LOAD_HI,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD_HI),
+                };
 
-        LO.write(.{ .TIMER_UNIT0_LOAD_LO = @truncate(value) });
-        HI.write(.{ .TIMER_UNIT0_LOAD_HI = @truncate(value >> 32) });
-        LOAD.write(.{ .TIMER_UNIT0_LOAD = 1 });
+                LO.write(.{ .TIMER_UNIT0_LOAD_LO = @truncate(value) });
+                HI.write(.{ .TIMER_UNIT0_LOAD_HI = @truncate(value >> 32) });
+                LOAD.write(.{ .TIMER_UNIT0_LOAD = 1 });
+            },
+            .esp32_c6 => {
+                const LOAD: @TypeOf(&SYSTIMER.UNIT0_LOAD) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_LOAD,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD),
+                };
+                const REGS: @TypeOf(&SYSTIMER.UNIT0LOAD) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0LOAD,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1LOAD),
+                };
+
+                REGS.LO.write(.{ .LOAD_LO = @truncate(value) });
+                REGS.HI.write(.{ .LOAD_HI = @truncate(value >> 32) });
+                LOAD.write(.{ .LOAD = 1 });
+            },
+        }
     }
 
     pub fn read(self: Unit) u52 {
@@ -93,30 +112,68 @@ pub const Unit = enum(u1) {
             .unit0 => &SYSTIMER.UNIT0_OP,
             .unit1 => @ptrCast(&SYSTIMER.UNIT1_OP),
         };
-        const LO: @TypeOf(&SYSTIMER.UNIT0_VALUE_LO) = switch (self) {
-            .unit0 => &SYSTIMER.UNIT0_VALUE_LO,
-            .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE_LO),
-        };
-        const HI: @TypeOf(&SYSTIMER.UNIT0_VALUE_HI) = switch (self) {
-            .unit0 => &SYSTIMER.UNIT0_VALUE_HI,
-            .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE_HI),
-        };
 
         // Set the "update" bit and wait for acknowledgment
-        OP.modify(.{ .TIMER_UNIT0_UPDATE = 1 });
-        while (OP.read().TIMER_UNIT0_VALUE_VALID != 1) {}
+        switch (compatibility.chip) {
+            .esp32_c3 => {
+                OP.modify(.{ .TIMER_UNIT0_UPDATE = 1 });
+                while (OP.read().TIMER_UNIT0_VALUE_VALID != 1) {}
+            },
+            .esp32_c6 => {
+                OP.modify(.{ .UPDATE = 1 });
+                while (OP.read().VALUE_VALID != 1) {}
+            },
+        }
 
         // Read LO, HI, then LO again, check that LO returns the same value. This accounts for the case
         // when an interrupt may happen between reading HI and LO values, and this function may get
         // called from the ISR. In this case, the repeated read will return consistent values.
-        var lo_start = LO.read().TIMER_UNIT0_VALUE_LO; // 32 bits
+        var lo_start = read_lo(self);
         while (true) {
             const lo = lo_start;
-            const hi = HI.read().TIMER_UNIT0_VALUE_HI;
-            lo_start = LO.read().TIMER_UNIT0_VALUE_LO;
+            const hi = read_hi(self);
+            lo_start = read_lo(self);
 
             if (lo_start == lo) return (@as(u52, hi) << 32) | lo;
         }
+    }
+
+    fn read_lo(self: Unit) u32 {
+        return switch (compatibility.chip) {
+            .esp32_c3 => blk: {
+                const LO: @TypeOf(&SYSTIMER.UNIT0_VALUE_LO) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_VALUE_LO,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE_LO),
+                };
+                break :blk LO.read().TIMER_UNIT0_VALUE_LO;
+            },
+            .esp32_c6 => blk: {
+                const REGS: @TypeOf(&SYSTIMER.UNIT0_VALUE) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_VALUE,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE),
+                };
+                break :blk REGS.LO.read().VALUE_LO;
+            },
+        };
+    }
+
+    fn read_hi(self: Unit) u20 {
+        return switch (compatibility.chip) {
+            .esp32_c3 => blk: {
+                const HI: @TypeOf(&SYSTIMER.UNIT0_VALUE_HI) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_VALUE_HI,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE_HI),
+                };
+                break :blk HI.read().TIMER_UNIT0_VALUE_HI;
+            },
+            .esp32_c6 => blk: {
+                const REGS: @TypeOf(&SYSTIMER.UNIT0_VALUE) = switch (self) {
+                    .unit0 => &SYSTIMER.UNIT0_VALUE,
+                    .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE),
+                };
+                break :blk REGS.HI.read().VALUE_HI;
+            },
+        };
     }
 };
 
@@ -136,7 +193,10 @@ pub const Alarm = enum(u2) {
 
     pub fn set_unit(self: Alarm, unit_: Unit) void {
         const conf = self.target_conf_reg();
-        conf.modify(.{ .TARGET0_TIMER_UNIT_SEL = @backingInt(unit_) });
+        switch (compatibility.chip) {
+            .esp32_c3 => conf.modify(.{ .TARGET0_TIMER_UNIT_SEL = @backingInt(unit_) }),
+            .esp32_c6 => conf.modify(.{ .TIMER_UNIT_SEL = @backingInt(unit_) }),
+        }
     }
 
     pub const Mode = enum {
@@ -146,41 +206,59 @@ pub const Alarm = enum(u2) {
 
     pub fn set_mode(self: Alarm, mode: Mode) void {
         const conf = self.target_conf_reg();
-        conf.modify(.{ .TARGET0_PERIOD_MODE = @intFromBool(mode == .period) });
+        switch (compatibility.chip) {
+            .esp32_c3 => conf.modify(.{ .TARGET0_PERIOD_MODE = @intFromBool(mode == .period) }),
+            .esp32_c6 => conf.modify(.{ .PERIOD_MODE = @intFromBool(mode == .period) }),
+        }
     }
 
     pub fn set_period(self: Alarm, value: u26) void {
         const conf = self.target_conf_reg();
         const comp_load = self.comp_load_reg();
 
-        conf.modify(.{
-            .TARGET0_PERIOD = value,
-        });
-
-        comp_load.write(.{
-            .TIMER_COMP0_LOAD = 1,
-        });
+        switch (compatibility.chip) {
+            .esp32_c3 => {
+                conf.modify(.{ .TARGET0_PERIOD = value });
+                comp_load.write(.{ .TIMER_COMP0_LOAD = 1 });
+            },
+            .esp32_c6 => {
+                conf.modify(.{ .PERIOD = value });
+                comp_load.write(.{ .LOAD = 1 });
+            },
+        }
     }
 
     pub fn set_target(self: Alarm, value: u52) void {
-        const target_lo: @TypeOf(&SYSTIMER.TARGET0_LO) = switch (self) {
-            .alarm0 => &SYSTIMER.TARGET0_LO,
-            .alarm1 => @ptrCast(&SYSTIMER.TARGET1_LO),
-            .alarm2 => @ptrCast(&SYSTIMER.TARGET2_LO),
-        };
-        const target_hi: @TypeOf(&SYSTIMER.TARGET0_HI) = switch (self) {
-            .alarm0 => &SYSTIMER.TARGET0_HI,
-            .alarm1 => @ptrCast(&SYSTIMER.TARGET1_HI),
-            .alarm2 => @ptrCast(&SYSTIMER.TARGET2_HI),
-        };
         const comp_load = self.comp_load_reg();
+        switch (compatibility.chip) {
+            .esp32_c3 => {
+                const target_lo: @TypeOf(&SYSTIMER.TARGET0_LO) = switch (self) {
+                    .alarm0 => &SYSTIMER.TARGET0_LO,
+                    .alarm1 => @ptrCast(&SYSTIMER.TARGET1_LO),
+                    .alarm2 => @ptrCast(&SYSTIMER.TARGET2_LO),
+                };
+                const target_hi: @TypeOf(&SYSTIMER.TARGET0_HI) = switch (self) {
+                    .alarm0 => &SYSTIMER.TARGET0_HI,
+                    .alarm1 => @ptrCast(&SYSTIMER.TARGET1_HI),
+                    .alarm2 => @ptrCast(&SYSTIMER.TARGET2_HI),
+                };
 
-        target_lo.write(.{ .TIMER_TARGET0_LO = @intCast(value & 0xffff_ffff) });
-        target_hi.write(.{ .TIMER_TARGET0_HI = @intCast(value >> 32) });
+                target_lo.write(.{ .TIMER_TARGET0_LO = @intCast(value & 0xffff_ffff) });
+                target_hi.write(.{ .TIMER_TARGET0_HI = @intCast(value >> 32) });
+                comp_load.write(.{ .TIMER_COMP0_LOAD = 1 });
+            },
+            .esp32_c6 => {
+                const target: @TypeOf(&SYSTIMER.TRGT0) = switch (self) {
+                    .alarm0 => &SYSTIMER.TRGT0,
+                    .alarm1 => @ptrCast(&SYSTIMER.TRGT1),
+                    .alarm2 => @ptrCast(&SYSTIMER.TRGT2),
+                };
 
-        comp_load.write(.{
-            .TIMER_COMP0_LOAD = 1,
-        });
+                target.LO.write(.{ .LO = @intCast(value & 0xffff_ffff) });
+                target.HI.write(.{ .HI = @intCast(value >> 32) });
+                comp_load.write(.{ .LOAD = 1 });
+            },
+        }
     }
 
     pub fn interrupt_source(self: Alarm) microzig.cpu.interrupt.Source {
@@ -192,18 +270,29 @@ pub const Alarm = enum(u2) {
     }
 
     pub fn set_interrupt_enabled(self: Alarm, enable: bool) void {
-        switch (self) {
-            .alarm0 => SYSTIMER.INT_ENA.modify(.{ .TARGET0_INT_ENA = @intFromBool(enable) }),
-            .alarm1 => SYSTIMER.INT_ENA.modify(.{ .TARGET1_INT_ENA = @intFromBool(enable) }),
-            .alarm2 => SYSTIMER.INT_ENA.modify(.{ .TARGET2_INT_ENA = @intFromBool(enable) }),
+        switch (compatibility.chip) {
+            .esp32_c3 => switch (self) {
+                .alarm0 => SYSTIMER.INT_ENA.modify(.{ .TARGET0_INT_ENA = @intFromBool(enable) }),
+                .alarm1 => SYSTIMER.INT_ENA.modify(.{ .TARGET1_INT_ENA = @intFromBool(enable) }),
+                .alarm2 => SYSTIMER.INT_ENA.modify(.{ .TARGET2_INT_ENA = @intFromBool(enable) }),
+            },
+            // The generated INT_* registers only expose TARGET0 (dim field), use raw bits.
+            .esp32_c6 => {
+                const bit = @as(u32, 1) << @backingInt(self);
+                if (enable) SYSTIMER.INT_ENA.raw |= bit else SYSTIMER.INT_ENA.raw &= ~bit;
+            },
         }
     }
 
     pub fn clear_interrupt(self: Alarm) void {
-        switch (self) {
-            .alarm0 => SYSTIMER.INT_CLR.modify(.{ .TARGET0_INT_CLR = 1 }),
-            .alarm1 => SYSTIMER.INT_CLR.modify(.{ .TARGET1_INT_CLR = 1 }),
-            .alarm2 => SYSTIMER.INT_CLR.modify(.{ .TARGET2_INT_CLR = 1 }),
+        switch (compatibility.chip) {
+            .esp32_c3 => switch (self) {
+                .alarm0 => SYSTIMER.INT_CLR.modify(.{ .TARGET0_INT_CLR = 1 }),
+                .alarm1 => SYSTIMER.INT_CLR.modify(.{ .TARGET1_INT_CLR = 1 }),
+                .alarm2 => SYSTIMER.INT_CLR.modify(.{ .TARGET2_INT_CLR = 1 }),
+            },
+            // write-1-to-clear
+            .esp32_c6 => SYSTIMER.INT_CLR.raw = @as(u32, 1) << @backingInt(self),
         }
     }
 
