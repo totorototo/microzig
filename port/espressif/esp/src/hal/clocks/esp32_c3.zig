@@ -85,7 +85,7 @@ pub const Config = struct {
         const cpu_clk_freq: u32 = switch (cpu_clk_source) {
             .pll_clk => |pll_clk| switch (pll_clk.cpu_freq) {
                 .@"80mhz" => 80_000_000,
-                .@"160mhz" => 80_000_000,
+                .@"160mhz" => 160_000_000,
             },
             .xtal_clk => |div| xtal_clk_freq / div,
         };
