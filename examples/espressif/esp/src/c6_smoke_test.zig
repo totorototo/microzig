@@ -70,6 +70,24 @@ pub fn main() !void {
     if (measured_us < 90_000 or measured_us > 110_000)
         std.log.err("systimer/ROM delay mismatch: clock config or systimer rate is wrong", .{});
 
+    // 3b. Split the suspects without the ROM delay: what the ROM believes the CPU runs at,
+    //     and how many CPU cycles (performance counter) elapse per systimer microsecond.
+    std.log.info("ROM cpu ticks/us: {}", .{hal.rom.functions.ets_get_cpu_frequency()});
+    {
+        const csr = microzig.cpu.csr;
+        csr.mpcer.write(.{ .cycle = 1 });
+        csr.mpcmr.write(.{ .count_en = 1 });
+        const window_us = 10_000;
+        const s0 = systimer.unit(0).read();
+        const c0 = csr.mpccr.read_raw();
+        while ((systimer.unit(0).read() - s0) / systimer.ticks_per_us() < window_us) {}
+        const c1 = csr.mpccr.read_raw();
+        std.log.info("cpu cycles per systimer us: {} (expected {})", .{
+            (c1 -% c0) / window_us,
+            cfg.cpu_clk_freq / 1_000_000,
+        });
+    }
+
     // 4. alarm interrupt every 100 ms
     alarm.set_unit(.unit0);
     alarm.set_period(@intCast(100_000 * systimer.ticks_per_us()));

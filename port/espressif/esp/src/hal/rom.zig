@@ -10,6 +10,7 @@ pub fn delay_us(us: u32) void {
 pub const functions = switch (compatibility.chip) {
     .esp32_c3 => struct {
         pub extern fn ets_delay_us(us: u32) callconv(.c) void;
+        pub extern fn ets_get_cpu_frequency() callconv(.c) u32;
         pub extern fn ets_update_cpu_frequency(ticks_per_us: u32) callconv(.c) void;
 
         pub extern fn esp_rom_regi2c_read(block: u8, host_id: u8, reg_add: u8) callconv(.c) u8;
@@ -22,6 +23,7 @@ pub const functions = switch (compatibility.chip) {
     // The C6 ROM has no analog-I2C (regi2c) helpers; ESP-IDF drives I2C_ANA_MST directly.
     .esp32_c6 => struct {
         pub extern fn ets_delay_us(us: u32) callconv(.c) void;
+        pub extern fn ets_get_cpu_frequency() callconv(.c) u32;
         pub extern fn ets_update_cpu_frequency(ticks_per_us: u32) callconv(.c) void;
     },
 };
