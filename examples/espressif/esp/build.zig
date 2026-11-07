@@ -13,19 +13,19 @@ pub fn build(b: *std.Build) void {
     const mb = MicroBuild.init(b, mz_dep) orelse return;
 
     const examples: []const Example = &.{
-        .{ .name = "blinky", .file = "src/blinky.zig" },
-        .{ .name = "custom_clock_config", .file = "src/custom_clock_config.zig" },
-        .{ .name = "gpio_input", .file = "src/gpio_input.zig" },
-        .{ .name = "i2c_accel", .file = "src/i2c_accel.zig" },
-        .{ .name = "i2c_bus_scan", .file = "src/i2c_bus_scan.zig" },
-        .{ .name = "i2c_temp", .file = "src/i2c_temp.zig" },
-        .{ .name = "i2c_display_sh1106", .file = "src/i2c_display_sh1106.zig" },
-        .{ .name = "ledc_pwm_servo", .file = "src/ledc_pwm_servo.zig" },
-        .{ .name = "stepper_driver", .file = "src/stepper_driver.zig" },
-        .{ .name = "stepper_driver_dumb", .file = "src/stepper_driver_dumb.zig" },
-        .{ .name = "systimer", .file = "src/systimer.zig" },
-        .{ .name = "ws2812_blinky", .file = "src/ws2812_blinky.zig" },
-        .{ .name = "rtos", .file = "src/rtos.zig" },
+        .{ .name = "blinky", .file = "src/blinky.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "custom_clock_config", .file = "src/custom_clock_config.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "gpio_input", .file = "src/gpio_input.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "i2c_accel", .file = "src/i2c_accel.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "i2c_bus_scan", .file = "src/i2c_bus_scan.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "i2c_temp", .file = "src/i2c_temp.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "i2c_display_sh1106", .file = "src/i2c_display_sh1106.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "ledc_pwm_servo", .file = "src/ledc_pwm_servo.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "stepper_driver", .file = "src/stepper_driver.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "stepper_driver_dumb", .file = "src/stepper_driver_dumb.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "systimer", .file = "src/systimer.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "ws2812_blinky", .file = "src/ws2812_blinky.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "rtos", .file = "src/rtos.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "tcp_server", .file = "src/tcp_server.zig", .features = .{
             .flashless = false,
             .lwip = true,
@@ -40,6 +40,9 @@ pub fn build(b: *std.Build) void {
 
         for (std.enums.values(TargetEnum)) |target_enum| {
             if (!example.features.flashless and std.mem.containsAtLeast(u8, @tagName(target_enum), 1, "flashless"))
+                continue;
+
+            if (!example.features.esp32_c6 and target_enum == .esp32_c6)
                 continue;
 
             const target_desc = target_enum.get_target_desc(mb);
@@ -94,6 +97,7 @@ const TargetEnum = enum {
     esp32_c3,
     esp32_c3_direct_boot,
     esp32_c3_flashless,
+    esp32_c6,
 
     fn get_target_desc(target_enum: TargetEnum, mb: *MicroBuild) TargetDescription {
         return switch (target_enum) {
@@ -109,6 +113,10 @@ const TargetEnum = enum {
                 .prefix = "esp32_c3_flashless",
                 .target = mb.ports.esp.chips.esp32_c3_flashless,
             },
+            .esp32_c6 => .{
+                .prefix = "esp32_c6",
+                .target = mb.ports.esp.chips.esp32_c6,
+            },
         };
     }
 };
@@ -122,6 +130,8 @@ const Example = struct {
     const Features = packed struct {
         flashless: bool = true,
         lwip: bool = false,
+        /// Ported to and building for the ESP32-C6.
+        esp32_c6: bool = false,
     };
 
     name: []const u8,
