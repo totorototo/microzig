@@ -160,9 +160,10 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // TODO: move app desc to the start of the image. This is currently done
-    // accidentally on esp32c3 because of the memory map (DROM comes before
-    // IROM).
+    // The bootloader expects the app desc (start of DROM) in the first segment.
+    // Flash segments are in address order, which gives that on every chip: on the
+    // ESP32-C3 DROM (0x3C..) is below IROM (0x42..), and on the ESP32-C6 the linker
+    // script places rodata below text in the shared flash window.
 
     // TODO: maybe also check if sections overlap
 
@@ -290,6 +291,14 @@ pub const chips: std.enums.EnumMap(esp_image.ChipId, Chip) = .init(.{
         .irom_map_end = 0x42800000,
         .drom_map_start = 0x3C000000,
         .drom_map_end = 0x3C800000,
+    },
+    // Unified I/D flash MMU window: the 2nd stage bootloader's SOC_DROM_* range equals
+    // SOC_IROM_*, so there is no DROM/IROM address split.
+    .esp32_c6 = .{
+        .irom_map_start = 0x42000000,
+        .irom_map_end = 0x42800000,
+        .drom_map_start = 0x42000000,
+        .drom_map_end = 0x42800000,
     },
 });
 
