@@ -79,8 +79,8 @@ pub const Unit = enum(u1) {
             .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD_LO),
         };
         const HI: @TypeOf(&SYSTIMER.UNIT0_LOAD_HI) = switch (self) {
-            .unit0 => &SYSTIMER.UNIT0_VALUE_HI,
-            .unit1 => @ptrCast(&SYSTIMER.UNIT1_VALUE_HI),
+            .unit0 => &SYSTIMER.UNIT0_LOAD_HI,
+            .unit1 => @ptrCast(&SYSTIMER.UNIT1_LOAD_HI),
         };
 
         LO.write(.{ .TIMER_UNIT0_LOAD_LO = @truncate(value) });
