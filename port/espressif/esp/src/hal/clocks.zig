@@ -30,3 +30,12 @@ const chip_specific = switch (compatibility.chip) {
     .esp32_c3 => @import("clocks/esp32_c3.zig"),
     .esp32_c6 => @import("clocks/esp32_c6.zig"),
 };
+
+/// True if a PLL clock config was requested but the PLL wasn't running at handover, so the CPU
+/// runs from XTAL instead (ESP32-C6 only for now, see clocks/esp32_c6.zig).
+pub fn pll_fell_back() bool {
+    return switch (compatibility.chip) {
+        .esp32_c6 => chip_specific.pll_fallback,
+        else => false,
+    };
+}

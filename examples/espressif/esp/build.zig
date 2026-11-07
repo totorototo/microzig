@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
 
     const examples: []const Example = &.{
         .{ .name = "blinky", .file = "src/blinky.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "c6_smoke_test", .file = "src/c6_smoke_test.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "custom_clock_config", .file = "src/custom_clock_config.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "gpio_input", .file = "src/gpio_input.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "i2c_accel", .file = "src/i2c_accel.zig", .features = .{ .esp32_c6 = true } },
