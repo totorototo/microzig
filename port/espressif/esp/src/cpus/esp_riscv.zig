@@ -239,7 +239,7 @@ pub const interrupt = struct {
     }
 
     pub fn get_mapped_interrupt(source: Source) ?Interrupt {
-        const source_raw: u4 = @truncate(get_source_map_register_for(source).*);
+        const source_raw: u5 = @truncate(get_source_map_register_for(source).*);
         if (source_raw != 0) {
             return @fromBackingInt(source_raw);
         } else {
