@@ -52,9 +52,10 @@ SECTIONS
     *(.rodata_wlog_*.*)
   } > DROM
 
-  .ram.text :
+  /* Align the section start, not just its contents: the bootloader copies RAM
+     segments with word stores, so a segment must not start unaligned. */
+  .ram.text : ALIGN(16)
   {
-    . = ALIGN(16);
     KEEP(*(.ram_text))
     KEEP(*(.ram_vectors))
 
@@ -62,9 +63,8 @@ SECTIONS
      * and offset done here (NOLOAD) */
   } > IRAM
 
-  .ram.text.wifi :
+  .ram.text.wifi : ALIGN(16)
   {
-    . = ALIGN(16);
     *( .wifi0iram  .wifi0iram.*)
     *( .wifirxiram  .wifirxiram.*)
     *( .wifislprxiram  .wifislprxiram.*)
@@ -81,9 +81,8 @@ SECTIONS
     . = ALIGN(ALIGNOF(.ram.text.wifi)) + SIZEOF(.ram.text.wifi);
   } > DRAM
 
-  .data :
+  .data : ALIGN(16)
   {
-    . = ALIGN(16);
     microzig_data_start = .;
     *(.sdata*)
     *(.data*)
@@ -91,9 +90,8 @@ SECTIONS
     microzig_data_end = .;
   } > DRAM
 
-  .data.wifi :
+  .data.wifi : ALIGN(16)
   {
-    . = ALIGN(16);
     *(.dram1*)
   } > DRAM
 
