@@ -3,7 +3,7 @@
 //! Logs over UART0 (TX = GPIO16 on the C6, already set up at 115200 baud by the bootloader),
 //! so it doesn't depend on the USB-Serial-JTAG driver. Checks, in order:
 //!   1. startup reaches main (watchdogs off, clocks applied)
-//!   2. which CPU clock is actually in use
+//!   2. which CPU clock is actually in use, and a PLL cold start (power down + recalibrate)
 //!   3. the systimer counts at the expected rate (compared to ROM delay)
 //!   4. a systimer alarm interrupt is delivered through the interrupt matrix + CPU controller
 //!   5. GPIO output toggles (LED on GPIO3)
@@ -57,8 +57,19 @@ pub fn main() !void {
     // 2. clocks
     const cfg = hal.clock_config;
     std.log.info("clock config: cpu={} Hz apb={} Hz", .{ cfg.cpu_clk_freq, cfg.apb_clk_freq });
-    if (hal.clocks.pll_fell_back())
-        std.log.warn("PLL was not running at handover: fell back to 40 MHz XTAL", .{});
+
+    // 2b. PLL cold start: the bootloader leaves the PLL running, so force the cold path by
+    //     dropping to XTAL and powering the PLL down. No logging while it's off: UART0 may be
+    //     clocked from a PLL tap.
+    if (hal.compatibility.chip == .esp32_c6 and cfg.cpu_clk_source == .pll_clk) {
+        hal.rom.delay_us(20_000); // let the UART TX FIFO drain
+        (comptime hal.clocks.Config.init_comptime(40_000_000)).apply();
+        hal.clocks.disable_pll();
+        const p0 = systimer.unit(0).read();
+        cfg.apply();
+        const p1 = systimer.unit(0).read();
+        std.log.info("PLL cold start: back on PLL in {} us", .{(p1 - p0) / systimer.ticks_per_us()});
+    }
 
     // 3. systimer rate vs ROM delay (the ROM delay counts CPU cycles, so this also checks
     //    that the ROM was told the right CPU frequency).

@@ -3,6 +3,9 @@ const microzig = @import("microzig");
 const peripherals = microzig.chip.peripherals;
 const PCR = peripherals.PCR;
 const LP_AON = peripherals.LP_AON;
+const PMU = peripherals.PMU;
+const I2C_ANA_MST = peripherals.I2C_ANA_MST;
+const regi2c = @import("../regi2c_esp32_c6.zig");
 const rom = microzig.hal.rom;
 const clocks = microzig.hal.clocks;
 
@@ -20,16 +23,13 @@ const clocks = microzig.hal.clocks;
 // Peripherals like UART, LEDC and I2C pick their own function clock in PCR, so most drivers
 // don't depend on the CPU clock.
 //
-// LIMITATION: BBPLL bring-up isn't implemented yet. The PLL source assumes the ESP-IDF 2nd stage
-// bootloader left the BBPLL running (it boots the CPU from it). If the bootloader handed over on
-// XTAL, `apply` falls back to XTAL and sets `pll_fallback`.
+// PLL: if the CPU already runs from the BBPLL (the ESP-IDF 2nd stage bootloader leaves it that
+// way), `apply` only changes dividers. Otherwise it powers up and calibrates the BBPLL first
+// (`enable_pll`), so a PLL config also works from a cold XTAL start.
 
 pub const xtal_clk_freq: u32 = 40_000_000;
 
 const pll_hp_root_freq: u32 = 160_000_000;
-
-/// Set by `Config.apply` when a PLL config was requested but the PLL wasn't running.
-pub var pll_fallback: bool = false;
 
 pub const CpuClockSource = union(enum) {
     pub const PllClock = struct {
@@ -109,28 +109,67 @@ pub const Config = struct {
         const cs = microzig.interrupt.enter_critical_section();
         defer cs.leave();
 
-        var effective = config;
-
         switch (config.cpu_clk_source) {
             .pll_clk => |pll_clk| {
-                if (PCR.SYSCLK_CONF.read().SOC_CLK_SEL == soc_clk_sel_pll) {
-                    switch_to_pll(pll_clk.cpu_freq);
-                } else {
-                    pll_fallback = true;
-                    effective = .init_from_cpu_clock_source(.{ .xtal_clk = 1 });
-                    switch_to_xtal(1);
-                }
+                // Never recalibrate the PLL the CPU is running from (ESP-IDF does the same).
+                if (PCR.SYSCLK_CONF.read().SOC_CLK_SEL != soc_clk_sel_pll) enable_pll();
+                switch_to_pll(pll_clk.cpu_freq);
             },
             .xtal_clk => |div| switch_to_xtal(div),
         }
 
-        apb_freq_update(effective.apb_clk_freq);
-        rom_cpu_frequency_update(effective.cpu_clk_freq);
+        apb_freq_update(config.apb_clk_freq);
+        rom_cpu_frequency_update(config.cpu_clk_freq);
     }
 };
 
 const soc_clk_sel_xtal = 0;
 const soc_clk_sel_pll = 1;
+
+/// Powers up the BBPLL and calibrates it to 480 MHz from the 40 MHz XTAL.
+/// Port of esp-hal `enable_pll_clk_impl` / ESP-IDF `rtc_clk_bbpll_enable` + `_configure`.
+fn enable_pll() void {
+    // Power up the BBPLL and its I2C interface. These are write-trigger bits.
+    PMU.IMM_HP_CK_POWER.write(.{
+        .TIE_HIGH_XPD_BB_I2C = 1,
+        .TIE_HIGH_XPD_BBPLL = 1,
+        .TIE_HIGH_XPD_BBPLL_I2C = 1,
+    });
+    PMU.IMM_HP_CK_POWER.write(.{ .TIE_HIGH_GLOBAL_BBPLL_ICG = 1 });
+
+    // Calibration start.
+    I2C_ANA_MST.ANA_CONF0.modify(.{ .BBPLL_STOP_FORCE_HIGH = 0, .BBPLL_STOP_FORCE_LOW = 1 });
+
+    const div_ref: u8 = 0; // don't divide the reference clock
+    const dchgp: u8 = 5;
+    const dcur: u8 = 3;
+    regi2c.write(.bbpll, regi2c.bbpll.oc_ref, (dchgp << 4) | div_ref);
+    regi2c.write(.bbpll, regi2c.bbpll.oc_div, 8); // 40 MHz * (8 + 4) = 480 MHz
+    regi2c.write_mask(.bbpll, regi2c.bbpll.oc_dr, 2, 0, 0); // OC_DR1
+    regi2c.write_mask(.bbpll, regi2c.bbpll.oc_dr, 6, 4, 0); // OC_DR3
+    regi2c.write(.bbpll, regi2c.bbpll.reg6, (1 << 6) | (3 << 4) | dcur); // DLREF/DHREF/DCUR
+    regi2c.write_mask(.bbpll, regi2c.bbpll.reg9, 1, 0, 2); // OC_VCO_DBIAS
+
+    while (I2C_ANA_MST.ANA_CONF0.read().CAL_DONE == 0) {}
+    // Calibration might stop early (esp-hal / ESP-IDF workaround).
+    rom.delay_us(10);
+
+    // Calibration stop.
+    I2C_ANA_MST.ANA_CONF0.modify(.{ .BBPLL_STOP_FORCE_HIGH = 1, .BBPLL_STOP_FORCE_LOW = 0 });
+}
+
+/// Powers down the BBPLL. The CPU must already run from XTAL (apply an XTAL config first).
+/// Stops everything clocked from PLL taps, notably USB-Serial-JTAG (48 MHz); peripherals on
+/// PLL_F80M etc. stop until a PLL config is applied again.
+pub fn disable_pll() void {
+    std.debug.assert(PCR.SYSCLK_CONF.read().SOC_CLK_SEL != soc_clk_sel_pll);
+    PMU.IMM_HP_CK_POWER.write(.{ .TIE_LOW_GLOBAL_BBPLL_ICG = 1 });
+    PMU.IMM_HP_CK_POWER.write(.{
+        .TIE_LOW_XPD_BB_I2C = 1,
+        .TIE_LOW_XPD_BBPLL = 1,
+        .TIE_LOW_XPD_BBPLL_I2C = 1,
+    });
+}
 
 fn switch_to_pll(cpu_freq: CpuClockSource.PllClock.CpuFreq) void {
     // The MSPI (flash) clock's default HS divider gives 120 MHz, which the flash can't take.
