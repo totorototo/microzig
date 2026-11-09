@@ -34,12 +34,16 @@
 
         .@"modules/riscv32-common" = .{ .path = "modules/riscv32-common" },
         .@"modules/rtt" = .{ .path = "modules/rtt" },
+
+        // Fork: exposed so apps fetching this repo by git URL can reach the network stack
+        // with `mz_dep.builder.lazyDependency("modules/lwip", ...)`. Lazy: only Wi-Fi apps
+        // download lwIP's sources.
+        .@"modules/lwip" = .{ .path = "modules/lwip", .lazy = true },
+        .@"modules/foundation-libc" = .{ .path = "modules/foundation-libc", .lazy = true },
     },
-    .paths = .{
-        "README.md",
-        "build.zig",
-        "build.zig.zon",
-        "LICENSE",
-        "tools/generate_linker_script.zig",
-    },
+    // Fork: the whole tree, so the repo can be fetched as a git dependency
+    // (`zig fetch --save git+https://...#<commit>`). Upstream's narrow list relies on the
+    // release tool's per-package tarballs instead; fetched by git URL, it drops every
+    // path dependency above.
+    .paths = .{""},
 }
