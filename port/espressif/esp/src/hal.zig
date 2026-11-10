@@ -13,6 +13,7 @@ pub const gpio = @import("hal/gpio.zig");
 pub const i2c = @import("hal/i2c.zig");
 pub const ledc = @import("hal/ledc.zig");
 pub const radio = @import("hal/radio.zig");
+pub const rmt = @import("hal/rmt.zig");
 pub const rng = @import("hal/rng.zig");
 pub const rom = @import("hal/rom.zig");
 pub const rtos = @import("hal/rtos.zig");

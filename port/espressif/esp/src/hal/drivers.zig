@@ -448,6 +448,97 @@ pub const GPIO_Device = struct {
 };
 
 ///
+/// WS2812 ("NeoPixel") LEDs on an RMT transmit channel.
+///
+/// Unlike `microzig.drivers.led.WS2812` over SPI, this doesn't take the SPI bus and needs no
+/// buffer: every bit is encoded into one RMT pulse code while the frame is being sent.
+///
+/// A frame longer than the channel memory (2 LEDs per memory block) is streamed, and `write`
+/// returns `error.Underrun` if the CPU was interrupted for too long. In that case give the channel
+/// more memory blocks or call `write` from a critical section.
+///
+pub const WS2812_RMT = struct {
+    pub const Color = mdf.led.ws2812.Color;
+
+    /// Bit timings. The defaults are in the middle of the WS2812B tolerances (+-150 ns).
+    pub const Timing = struct {
+        t0h_ns: u32 = 400,
+        t0l_ns: u32 = 850,
+        t1h_ns: u32 = 800,
+        t1l_ns: u32 = 450,
+        /// Low time that latches a frame. 50 us on old parts, 280 us on recent ones.
+        reset_us: u32 = 300,
+    };
+
+    channel: hal.rmt.Tx,
+    /// Pulse codes of a 0 bit and of a 1 bit.
+    codes: [2]hal.rmt.Pulse,
+    reset_us: u32,
+    next_write_time: ?time.Absolute = null,
+
+    /// The channel must be configured with a low idle level and connected to the data pin.
+    /// `tick_freq` is its tick frequency (`hal.rmt.Tx.Config.tick_freq`), at least 10 MHz.
+    pub fn init(channel: hal.rmt.Tx, tick_freq: u32, timing: Timing) WS2812_RMT {
+        return .{
+            .channel = channel,
+            .codes = .{
+                code(tick_freq, timing.t0h_ns, timing.t0l_ns),
+                code(tick_freq, timing.t1h_ns, timing.t1l_ns),
+            },
+            .reset_us = timing.reset_us,
+        };
+    }
+
+    /// Writes the colors, in order, to the LEDs.
+    pub fn write(dev: *WS2812_RMT, colors: []const Color) hal.rmt.Tx.Error!void {
+        // Ensures that a reset takes place between writes.
+        if (dev.next_write_time) |next_write_time| {
+            while (!next_write_time.is_reached_by(hal.time.get_time_since_boot())) {}
+        }
+        defer dev.next_write_time = time.make_timeout_us(hal.time.get_time_since_boot(), dev.reset_us);
+
+        var encoder: Encoder = .{ .colors = colors, .codes = dev.codes };
+        try dev.channel.transmit_blocking(&encoder);
+    }
+
+    fn code(tick_freq: u32, high_ns: u32, low_ns: u32) hal.rmt.Pulse {
+        return .{
+            .level0 = 1,
+            .duration0 = ticks(tick_freq, high_ns),
+            .level1 = 0,
+            .duration1 = ticks(tick_freq, low_ns),
+        };
+    }
+
+    fn ticks(tick_freq: u32, ns: u32) u15 {
+        const ns_per_s = 1_000_000_000;
+        return @intCast((@as(u64, ns) * tick_freq + ns_per_s / 2) / ns_per_s);
+    }
+
+    /// Turns the colors into pulse codes one bit at a time: G, R, B, most significant bit first.
+    const Encoder = struct {
+        colors: []const Color,
+        codes: [2]hal.rmt.Pulse,
+        bit: u5 = 0,
+
+        pub fn next(encoder: *Encoder) ?hal.rmt.Pulse {
+            if (encoder.colors.len == 0) return null;
+
+            const color = encoder.colors[0];
+            const grb = @as(u24, color.g) << 16 | @as(u24, color.r) << 8 | color.b;
+            const value: u1 = @truncate(grb >> (23 - encoder.bit));
+
+            encoder.bit += 1;
+            if (encoder.bit == 24) {
+                encoder.bit = 0;
+                encoder.colors = encoder.colors[1..];
+            }
+            return encoder.codes[value];
+        }
+    };
+};
+
+///
 /// Implementation of a `ClockDevice` that uses the HAL's `time` module.
 ///
 pub fn clock_device() ClockDevice {

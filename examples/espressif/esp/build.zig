@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "stepper_driver_dumb", .file = "src/stepper_driver_dumb.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "systimer", .file = "src/systimer.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "ws2812_blinky", .file = "src/ws2812_blinky.zig", .features = .{ .esp32_c6 = true } },
+        .{ .name = "ws2812_rmt", .file = "src/ws2812_rmt.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "rtos", .file = "src/rtos.zig", .features = .{ .esp32_c6 = true } },
         .{ .name = "tcp_server", .file = "src/tcp_server.zig", .features = .{
             .flashless = false,
