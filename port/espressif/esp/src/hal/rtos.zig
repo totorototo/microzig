@@ -1120,6 +1120,39 @@ pub const TypeErasedQueue = struct {
         return q.put_non_blocking_from_cs(elements, hptw);
     }
 
+    /// Puts `elements` in front of what is already queued, so that they are the next ones read.
+    /// All or nothing: returns false if the room for them didn't come before the timeout.
+    pub fn put_front(q: *TypeErasedQueue, elements: []const u8, timeout: Timeout) bool {
+        assert(elements.len <= q.buffer.len);
+        if (elements.len == 0) return true;
+
+        const cs = enter_critical_section();
+        defer cs.leave();
+
+        const resolved_timeout: ResolvedTimeout = .init(timeout);
+
+        while (q.buffer.len - q.len < elements.len) {
+            const maybe_remaining_duration = resolved_timeout.tick() catch return false;
+            q.putters.wait(maybe_remaining_duration);
+        }
+
+        // Move the start back, wrapping around the end of the buffer.
+        q.start = if (q.start >= elements.len)
+            q.start - elements.len
+        else
+            q.start + q.buffer.len - elements.len;
+        q.len += elements.len;
+
+        const first_len = @min(elements.len, q.buffer.len - q.start);
+        @memcpy(q.buffer[q.start..][0..first_len], elements[0..first_len]);
+        @memcpy(q.buffer[0 .. elements.len - first_len], elements[first_len..]);
+
+        var hptw = false;
+        q.getters.wake_one(&hptw);
+        if (hptw) yield_from_cs(.reschedule);
+        return true;
+    }
+
     fn put_non_blocking_from_cs(q: *TypeErasedQueue, elements: []const u8, hptw: *bool) usize {
         var n: usize = 0;
         while (q.puttable_slice()) |slice| {

@@ -495,7 +495,9 @@ pub fn queue_create(capacity: u32, item_len: u32) callconv(.c) ?*anyopaque {
         break :blk .{ 3, 8 };
     };
 
-    const buf: []u8 = gpa.alloc(u8, new_cap * item_len) catch {
+    // The buffer must hold whole items: the queue works on bytes, and a size that isn't a
+    // multiple of the item length would let it accept part of an item.
+    const buf: []u8 = gpa.alloc(u8, new_cap * new_item_len) catch {
         log.warn("failed to allocate queue buffer", .{});
         return null;
     };
@@ -554,12 +556,23 @@ pub fn queue_send_from_isr(ptr: ?*anyopaque, item_ptr: ?*anyopaque, _hptw: ?*any
     return @intCast(n);
 }
 
-pub fn queue_send_to_back() callconv(.c) void {
-    @panic("queue_send_to_back: not implemented");
+pub fn queue_send_to_back(ptr: ?*anyopaque, item_ptr: ?*anyopaque, block_time_tick: u32) callconv(.c) i32 {
+    // The queue is a FIFO, a plain send already goes to the back.
+    return queue_send(ptr, item_ptr, block_time_tick);
 }
 
-pub fn queue_send_to_front() callconv(.c) void {
-    @panic("queue_send_to_front: not implemented");
+pub fn queue_send_to_front(ptr: ?*anyopaque, item_ptr: ?*anyopaque, block_time_tick: u32) callconv(.c) i32 {
+    log.debug("queue_send_to_front {?} {?} {}", .{ ptr, item_ptr, block_time_tick });
+
+    const queue: *QueueWrapper = @ptrCast(@alignCast(ptr));
+    const item: [*]const u8 = @ptrCast(@alignCast(item_ptr));
+
+    const timeout: rtos.Timeout = switch (block_time_tick) {
+        0 => .non_blocking,
+        c.OSI_FUNCS_TIME_BLOCKING => .never,
+        else => |ticks| .{ .after = .from_ticks(ticks) },
+    };
+    return if (queue.inner.put_front(item[0..queue.item_len], timeout)) 1 else -1;
 }
 
 pub fn queue_recv(ptr: ?*anyopaque, item_ptr: ?*anyopaque, block_time_tick: u32) callconv(.c) i32 {
@@ -1084,8 +1097,21 @@ pub fn get_random(buf: [*c]u8, len: usize) callconv(.c) c_int {
     return 0;
 }
 
-pub fn get_time() callconv(.c) void {
-    @panic("get_time: not implemented");
+/// `struct os_time` of the blobs' wpa_supplicant: seconds and microseconds, as longs.
+const OsTime = extern struct {
+    sec: c_long,
+    usec: c_long,
+};
+
+/// Time since boot. There is no wall clock; the supplicant only uses it for intervals.
+pub fn get_time(t: ?*anyopaque) callconv(.c) c_int {
+    const os_time: *OsTime = @ptrCast(@alignCast(t orelse return -1));
+    const usec = get_time_since_boot().to_us();
+    os_time.* = .{
+        .sec = @intCast(usec / 1_000_000),
+        .usec = @intCast(usec % 1_000_000),
+    };
+    return 0;
 }
 
 pub fn random() callconv(.c) c_ulong {
@@ -1113,8 +1139,22 @@ pub fn log_timestamp() callconv(.c) u32 {
 
 pub const malloc_internal = malloc;
 
-pub fn realloc_internal() callconv(.c) void {
-    @panic("realloc_internal: not implemented");
+/// C `realloc` on top of `malloc` and `free`: the allocation's length is stored in front of it.
+pub fn realloc_internal(ptr: ?*anyopaque, len: usize) callconv(.c) ?*anyopaque {
+    log.debug("realloc {?} {}", .{ ptr, len });
+
+    const old = ptr orelse return malloc(len);
+    if (len == 0) {
+        free(old);
+        return null;
+    }
+
+    const old_len: *const usize = @ptrFromInt(@intFromPtr(old) - 8);
+    const new = malloc(len) orelse return null; // the old block stays valid, as in C
+    const copy_len = @min(old_len.*, len);
+    @memcpy(@as([*]u8, @ptrCast(new))[0..copy_len], @as([*]const u8, @ptrCast(old))[0..copy_len]);
+    free(old);
+    return new;
 }
 
 pub const calloc_internal = calloc;
@@ -1130,9 +1170,7 @@ pub fn zalloc_internal(len: usize) callconv(.c) ?*anyopaque {
 
 pub const wifi_malloc = malloc;
 
-pub fn wifi_realloc() callconv(.c) void {
-    @panic("wifi_realloc: not implemented");
-}
+pub const wifi_realloc = realloc_internal;
 
 pub const wifi_calloc = calloc;
 pub const wifi_zalloc = zalloc_internal;
