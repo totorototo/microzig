@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
             if (!example.features.flashless and std.mem.containsAtLeast(u8, @tagName(target_enum), 1, "flashless"))
                 continue;
 
-            if (!example.features.esp32_c6 and target_enum == .esp32_c6)
+            if (!example.features.esp32_c6 and std.mem.startsWith(u8, @tagName(target_enum), "esp32_c6"))
                 continue;
 
             const target_desc = target_enum.get_target_desc(mb);
@@ -101,6 +101,8 @@ const TargetEnum = enum {
     esp32_c3_direct_boot,
     esp32_c3_flashless,
     esp32_c6,
+    esp32_c6_direct_boot,
+    esp32_c6_flashless,
 
     fn get_target_desc(target_enum: TargetEnum, mb: *MicroBuild) TargetDescription {
         return switch (target_enum) {
@@ -119,6 +121,14 @@ const TargetEnum = enum {
             .esp32_c6 => .{
                 .prefix = "esp32_c6",
                 .target = mb.ports.esp.chips.esp32_c6,
+            },
+            .esp32_c6_direct_boot => .{
+                .prefix = "esp32_c6_direct_boot",
+                .target = mb.ports.esp.chips.esp32_c6_direct_boot,
+            },
+            .esp32_c6_flashless => .{
+                .prefix = "esp32_c6_flashless",
+                .target = mb.ports.esp.chips.esp32_c6_flashless,
             },
         };
     }

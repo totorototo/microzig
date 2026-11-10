@@ -9,6 +9,8 @@ chips: struct {
     esp32_c3_direct_boot: *const microzig.Target,
     esp32_c3_flashless: *const microzig.Target,
     esp32_c6: *const microzig.Target,
+    esp32_c6_direct_boot: *const microzig.Target,
+    esp32_c6_flashless: *const microzig.Target,
 },
 
 boards: struct {},
@@ -230,6 +232,52 @@ pub fn init(dep: *std.Build.Dependency) ?Self {
                 },
             }),
             .esp32_c6 = chip_esp32_c6.derive(.{}),
+            // No 2nd stage bootloader: the ROM runs the binary at flash offset 0 in place.
+            .esp32_c6_direct_boot = chip_esp32_c6.derive(.{
+                .preferred_binary_format = .binary,
+                .cpu = .{
+                    .name = "esp_riscv",
+                    .root_source_file = b.path("src/cpus/esp_riscv.zig"),
+                    .imports = b.allocator.dupe(Import, &.{
+                        .{
+                            .name = "cpu-config",
+                            .module = get_cpu_config(b, .direct, .esp32_c6),
+                        },
+                        .{
+                            .name = "riscv32-common",
+                            .module = riscv32_common_mod,
+                        },
+                    }) catch @panic("OOM"),
+                },
+                .linker_script = .{
+                    .generate = .memory_regions,
+                    .file = generate_linker_script(
+                        dep,
+                        "final.ld",
+                        &.{
+                            b.path("ld/esp32_c6/direct_boot_sections.ld"),
+                            b.path("ld/esp32_c6/common_sections.ld"),
+                            b.path("ld/esp32_c6/rom_functions.ld"),
+                        },
+                    ),
+                },
+            }),
+            // Runs from RAM only, loaded by `espflash flash --ram`.
+            .esp32_c6_flashless = chip_esp32_c6.derive(.{
+                .ram_image = true,
+                .linker_script = .{
+                    .generate = .memory_regions,
+                    .file = generate_linker_script(
+                        dep,
+                        "final.ld",
+                        &.{
+                            b.path("ld/esp32_c6/flashless_sections.ld"),
+                            b.path("ld/esp32_c6/common_sections.ld"),
+                            b.path("ld/esp32_c6/rom_functions.ld"),
+                        },
+                    ),
+                },
+            }),
         },
         .boards = .{},
     };
