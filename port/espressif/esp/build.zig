@@ -100,7 +100,6 @@ pub fn init(dep: *std.Build.Dependency) ?Self {
         },
     };
 
-
     const esp32_c6_zig_target: std.Target.Query = .{
         .cpu_arch = .riscv32,
         .cpu_model = .{ .explicit = &std.Target.riscv.cpu.generic_rv32 },
@@ -251,6 +250,16 @@ pub fn build(b: *std.Build) void {
     const unit_tests_run = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run platform agnostic unit tests");
     test_step.dependOn(&unit_tests_run.step);
+
+    // The NVS store only depends on std: its tests run against a simulated flash.
+    const nvs_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/hal/nvs.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(nvs_tests).step);
 
     const cat_exe = b.addExecutable(.{
         .name = "cat",
