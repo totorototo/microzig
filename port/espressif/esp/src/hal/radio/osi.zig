@@ -118,9 +118,10 @@ pub fn free(ptr: ?*anyopaque) callconv(.c) void {
     // ignore it.
     if (ptr == null) return;
 
+    // `malloc` put the length in an 8-byte header (8 for the alignment, not @sizeOf(usize)).
     const buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - 8);
     const buf_len: *usize = @ptrCast(@alignCast(buf_ptr));
-    gpa.rawFree(buf_ptr[0 .. @sizeOf(usize) + buf_len.*], .@"8", @returnAddress());
+    gpa.rawFree(buf_ptr[0 .. 8 + buf_len.*], .@"8", @returnAddress());
 }
 
 pub fn puts(ptr: ?*anyopaque) callconv(.c) void {
