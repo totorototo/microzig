@@ -22,8 +22,9 @@ pub const Options = struct {
 const InitError = std.mem.Allocator.Error || PowerSaveError;
 
 pub const InitConfig = struct {
-    /// Where the Wi-Fi driver keeps its configuration (namespace "nvs.net80211"), like ESP-IDF
-    /// with `nvs_enable`. Null keeps it in RAM only. The store must outlive Wi-Fi; while Wi-Fi
+    /// Where the Wi-Fi driver keeps its configuration (namespace "nvs.net80211") and the PHY
+    /// its RF calibration data (namespace "phy"), like ESP-IDF with `nvs_enable`. Null keeps
+    /// both in RAM only: the PHY then calibrates fully at every boot. The store must outlive Wi-Fi; while Wi-Fi
     /// is initialised, the application must use it only between `lock_nvs` and `unlock_nvs`.
     nvs: ?*flash.Nvs = null,
 

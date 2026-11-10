@@ -84,6 +84,14 @@ pub fn deinit() void {
     timer.deinit(osi.gpa);
 }
 
+pub const PhyCalibration = osi.PhyCalibration;
+
+/// How the RF was calibrated when Wi-Fi first enabled the PHY; null before that. With
+/// `wifi.InitConfig.nvs` set, boots after the first one reuse the saved data (`.partial`).
+pub fn phy_calibration() ?PhyCalibration {
+    return osi.phy_calibration;
+}
+
 pub fn read_mac(iface: enum {
     sta,
     ap,

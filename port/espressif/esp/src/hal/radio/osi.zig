@@ -917,26 +917,141 @@ fn clocks_phy_set_enabled_c3(enable: bool) void {
     APB_CTRL.WIFI_CLK_EN.write(.{ .WIFI_CLK_EN = wifi_clk_en });
 }
 
+// PHY bring-up, after esp-phy and ESP-IDF's esp_phy_init.c. The first enable after power-up
+// calibrates the RF; later ones only wake the PHY up. With an NVS store (`wifi.InitConfig.nvs`)
+// the calibration data is kept in the "phy" namespace with ESP-IDF's keys, so later boots do a
+// partial calibration from it instead of a full one.
+
+const phy = struct {
+    extern fn phy_init_param_set(param: u8) void;
+    extern fn phy_wifi_enable_set(enable: u8) void;
+    extern fn phy_bbpll_en_usb(en: bool) void;
+    extern fn phy_wakeup_init() void;
+    extern fn phy_close_rf() void;
+    extern fn phy_xpd_tsens() void;
+    extern fn phy_get_rf_cal_version() u32;
+    extern fn phy_dig_reg_backup(backup_en: bool, mem_addr: *[21]u32) void;
+};
+
+/// How the RF was calibrated at the first PHY enable since power-up.
+pub const PhyCalibration = struct {
+    /// Partial: from calibration data saved by an earlier boot. Full: from scratch.
+    mode: enum { partial, full },
+    /// The PHY rejected the saved data (bad checksum or older format) and calibrated fully.
+    data_check_failed: bool,
+    /// The resulting data was written to NVS.
+    saved: bool,
+};
+
+pub var phy_calibration: ?PhyCalibration = null;
+
+var phy_ref_count: u32 = 0;
+var phy_calibrated = false;
+var phy_cal_data: c.esp_phy_calibration_data_t = std.mem.zeroes(c.esp_phy_calibration_data_t);
+// The C3 loses these PHY registers while the PHY is off (`phy_backed_up_digital_register_count`).
+var phy_dig_regs: [21]u32 = undefined;
+
+const phy_namespace = "phy";
+
+fn phy_load_calibration() bool {
+    const store = nvs_store orelse return false;
+    nvs_mutex.lock();
+    defer nvs_mutex.unlock();
+
+    const h = store.open(phy_namespace, .read_only) catch return false;
+    const version = h.get(u32, "cal_version") catch return false;
+    if (version != phy.phy_get_rf_cal_version()) return false;
+    var mac: [6]u8 = undefined;
+    const stored_mac = h.get_blob("cal_mac", &mac) catch return false;
+    if (!std.mem.eql(u8, stored_mac, &radio.read_mac(.sta))) return false;
+    const data = std.mem.asBytes(&phy_cal_data);
+    const stored = h.get_blob("cal_data", data) catch return false;
+    return stored.len == data.len;
+}
+
+fn phy_save_calibration() bool {
+    const store = nvs_store orelse return false;
+    nvs_mutex.lock();
+    defer nvs_mutex.unlock();
+
+    const h = store.open(phy_namespace, .read_write) catch |err| return phy_save_failed(err);
+    h.set(u32, "cal_version", phy.phy_get_rf_cal_version()) catch |err| return phy_save_failed(err);
+    h.set_blob("cal_mac", &radio.read_mac(.sta)) catch |err| return phy_save_failed(err);
+    h.set_blob("cal_data", std.mem.asBytes(&phy_cal_data)) catch |err| return phy_save_failed(err);
+    return true;
+}
+
+fn phy_save_failed(err: anyerror) bool {
+    log.warn("phy: saving the calibration data failed: {t}", .{err});
+    return false;
+}
+
 pub fn phy_disable() callconv(.c) void {
     log.debug("phy_disable", .{});
+
+    const cs = enter_critical_section();
+    defer cs.leave();
+
+    // On combo modules (C3, C6) Wi-Fi RX is switched with the PHY: off here, on in
+    // `phy_enable`, as in ESP-IDF's esp_phy_{enable,disable}_wrapper.
+    phy.phy_wifi_enable_set(0);
+
+    assert(phy_ref_count > 0);
+    phy_ref_count -= 1;
+    if (phy_ref_count > 0) return;
+
+    if (compatibility.chip == .esp32_c3) phy.phy_dig_reg_backup(true, &phy_dig_regs);
+    phy.phy_close_rf();
+    phy.phy_xpd_tsens();
     clocks_phy_set_enabled(false);
 }
 
 pub fn phy_enable() callconv(.c) void {
     log.debug("phy_enable", .{});
 
-    const cs = enter_critical_section();
-    defer cs.leave();
+    // Flash access can block, so it stays outside the critical section.
+    const first = !phy_calibrated;
+    const loaded = first and phy_load_calibration();
+    var result: c_int = 0;
 
-    clocks_phy_set_enabled(true);
+    {
+        const cs = enter_critical_section();
+        defer cs.leave();
 
-    // TODO: fully implement phy enable
-    var cal_data: c.esp_phy_calibration_data_t = std.mem.zeroes(c.esp_phy_calibration_data_t);
+        if (phy_ref_count == 0) {
+            clocks_phy_set_enabled(true);
+            if (phy_calibrated) {
+                phy.phy_wakeup_init();
+                if (compatibility.chip == .esp32_c3) phy.phy_dig_reg_backup(false, &phy_dig_regs);
+            } else {
+                log.debug("phy_version {s}", .{c.get_phy_version_str()});
+                phy.phy_init_param_set(1);
+                // Keeps the USB-Serial-JTAG alive while the radio runs (esp-phy's default).
+                phy.phy_bbpll_en_usb(true);
+                result = c.register_chipv7_phy(
+                    &phy_init_data_default,
+                    &phy_cal_data,
+                    if (loaded) c.PHY_RF_CAL_PARTIAL else c.PHY_RF_CAL_FULL,
+                );
+                phy_calibrated = true;
+            }
+        }
+        phy_ref_count += 1;
+        phy.phy_wifi_enable_set(1);
+    }
 
-    const phy_version = c.get_phy_version_str();
-    log.debug("phy_version {s}", .{phy_version});
-
-    _ = c.register_chipv7_phy(&phy_init_data_default, &cal_data, c.PHY_RF_CAL_PARTIAL);
+    if (first) {
+        // Without saved data the buffer is zeroed, which the PHY also reports as a failed check.
+        const check_failed = loaded and result == c.ESP_CAL_DATA_CHECK_FAIL;
+        if (check_failed) log.warn("phy: saved calibration data rejected, calibrated fully", .{});
+        // Like ESP-IDF: save after a full calibration, or when the saved data was rejected.
+        const saved = (!loaded or check_failed) and phy_save_calibration();
+        phy_calibration = .{
+            .mode = if (loaded) .partial else .full,
+            .data_check_failed = check_failed,
+            .saved = saved,
+        };
+    }
 }
 
 pub fn phy_update_country_info(country: [*c]const u8) callconv(.c) c_int {
