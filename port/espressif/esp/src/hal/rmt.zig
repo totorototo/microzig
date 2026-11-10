@@ -192,7 +192,12 @@ pub const Tx = enum(u1) {
             },
         };
         pin.apply(.{ .output_enable = true });
-        pin.connect_peripheral_to_output(.{ .signal = signal });
+        // The channel drives the output enable itself, as in ESP-IDF and esp-hal. Forcing it
+        // from the GPIO enable register instead makes Wokwi output the signal inverted.
+        pin.connect_peripheral_to_output(.{
+            .signal = signal,
+            .output_enable_signal_controlled_by_peripheral = true,
+        });
     }
 
     /// Transmits the pulses and waits for the end of the transmission. An end marker in `pulses`
