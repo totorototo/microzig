@@ -8,6 +8,7 @@ const time = microzig.drivers.time;
 
 const radio = @import("../radio.zig");
 const osi = @import("osi.zig");
+const flash = @import("../flash.zig");
 const compatibility = @import("../compatibility.zig");
 
 const log = std.log.scoped(.esp_radio_wifi);
@@ -21,6 +22,11 @@ pub const Options = struct {
 const InitError = std.mem.Allocator.Error || PowerSaveError;
 
 pub const InitConfig = struct {
+    /// Where the Wi-Fi driver keeps its configuration (namespace "nvs.net80211"), like ESP-IDF
+    /// with `nvs_enable`. Null keeps it in RAM only. The store must outlive Wi-Fi; while Wi-Fi
+    /// is initialised, the application must use it only between `lock_nvs` and `unlock_nvs`.
+    nvs: ?*flash.Nvs = null,
+
     /// Power save mode. Only `.none` is supported on the ESP32-C6.
     power_save_mode: PowerSaveMode = .none,
 
@@ -161,7 +167,10 @@ pub fn init(gpa: std.mem.Allocator, config: InitConfig) InitError!void {
         init_config.ampdu_tx_enable = @intFromBool(config.ampdu_tx_enable);
         init_config.amsdu_tx_enable = @intFromBool(config.amsdu_tx_enable);
         init_config.rx_ba_win = config.rx_ba_win;
+        init_config.nvs_enable = @intFromBool(config.nvs != null);
+        osi.nvs_store = config.nvs;
     }
+    errdefer osi.nvs_store = null;
 
     // TODO: if coex enabled
     if (false) try c_err(c.coex_init());
@@ -188,8 +197,19 @@ pub fn deinit() void {
     _ = c.esp_wifi_stop();
     _ = c.esp_wifi_deinit_internal();
     _ = c.esp_supplicant_deinit();
+    osi.nvs_store = null;
 
     radio.deinit();
+}
+
+/// Takes the lock the Wi-Fi driver holds while it uses `InitConfig.nvs`. Needed only to use
+/// that store from the application while Wi-Fi is initialised.
+pub fn lock_nvs() void {
+    osi.nvs_mutex.lock();
+}
+
+pub fn unlock_nvs() void {
+    osi.nvs_mutex.unlock();
 }
 
 pub const ConfigError = InternalError || error{
@@ -742,6 +762,15 @@ pub fn get_sta_state() StaState {
     return sta_state.load(.monotonic);
 }
 
+/// The SSID of the current station config: the one last applied, or with `InitConfig.nvs`, the
+/// one saved in flash by a previous boot. Empty when there is none.
+pub fn get_sta_ssid(buf: *[32]u8) InternalError![]const u8 {
+    var tmp: c_patched.wifi_config_t = undefined;
+    try c_err(c_patched.esp_wifi_get_config(c.WIFI_IF_STA, &tmp));
+    buf.* = tmp.sta.ssid;
+    return buf[0 .. std.mem.indexOfScalar(u8, buf, 0) orelse buf.len];
+}
+
 pub const Interface = enum(u32) {
     ap = c.WIFI_IF_AP,
     sta = c.WIFI_IF_STA,
@@ -1061,18 +1090,18 @@ var g_wifi_osi_funcs: c.wifi_osi_funcs_t = osi_funcs: {
         ._wifi_rtc_enable_iso = @ptrCast(&osi.wifi_rtc_enable_iso),
         ._wifi_rtc_disable_iso = @ptrCast(&osi.wifi_rtc_disable_iso),
         ._esp_timer_get_time = osi.esp_timer_get_time,
-        ._nvs_set_i8 = @ptrCast(&osi.nvs_set_i8),
-        ._nvs_get_i8 = @ptrCast(&osi.nvs_get_i8),
-        ._nvs_set_u8 = @ptrCast(&osi.nvs_set_u8),
-        ._nvs_get_u8 = @ptrCast(&osi.nvs_get_u8),
-        ._nvs_set_u16 = @ptrCast(&osi.nvs_set_u16),
-        ._nvs_get_u16 = @ptrCast(&osi.nvs_get_u16),
-        ._nvs_open = @ptrCast(&osi.nvs_open),
-        ._nvs_close = @ptrCast(&osi.nvs_close),
-        ._nvs_commit = @ptrCast(&osi.nvs_commit),
-        ._nvs_set_blob = @ptrCast(&osi.nvs_set_blob),
-        ._nvs_get_blob = @ptrCast(&osi.nvs_get_blob),
-        ._nvs_erase_key = @ptrCast(&osi.nvs_erase_key),
+        ._nvs_set_i8 = &osi.nvs_set_i8,
+        ._nvs_get_i8 = &osi.nvs_get_i8,
+        ._nvs_set_u8 = &osi.nvs_set_u8,
+        ._nvs_get_u8 = &osi.nvs_get_u8,
+        ._nvs_set_u16 = &osi.nvs_set_u16,
+        ._nvs_get_u16 = &osi.nvs_get_u16,
+        ._nvs_open = &osi.nvs_open,
+        ._nvs_close = &osi.nvs_close,
+        ._nvs_commit = &osi.nvs_commit,
+        ._nvs_set_blob = &osi.nvs_set_blob,
+        ._nvs_get_blob = &osi.nvs_get_blob,
+        ._nvs_erase_key = &osi.nvs_erase_key,
         ._get_random = osi.get_random,
         ._get_time = osi.get_time,
         ._random = &osi.random,
@@ -1301,6 +1330,7 @@ pub const c_patched = struct {
     };
 
     pub extern fn esp_wifi_set_config(interface: c.wifi_interface_t, conf: ?*wifi_config_t) c.esp_err_t;
+    pub extern fn esp_wifi_get_config(interface: c.wifi_interface_t, conf: ?*wifi_config_t) c.esp_err_t;
 
     pub const wifi_ap_record_t = extern struct {
         bssid: [6]u8 = std.mem.zeroes([6]u8),

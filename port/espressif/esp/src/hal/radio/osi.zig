@@ -1044,52 +1044,172 @@ pub fn esp_timer_get_time() callconv(.c) i64 {
     return @intCast(get_time_since_boot().to_us());
 }
 
-pub fn nvs_set_i8() callconv(.c) void {
-    @panic("nvs_set_i8: not implemented");
+// NVS callbacks, used when `wifi.InitConfig.nvs` is set (`nvs_enable = 1`). The blob stores
+// its configuration in the "nvs.net80211" namespace. Return values are ESP-IDF's codes.
+
+const Nvs = @import("../flash.zig").Nvs;
+
+/// The store given to `wifi.init`, or null when Wi-Fi doesn't persist its configuration.
+pub var nvs_store: ?*Nvs = null;
+/// Serialises store access between the Wi-Fi task and the application (`wifi.lock_nvs`).
+pub var nvs_mutex: rtos.Mutex = .{};
+
+const esp_ok = 0;
+const esp_fail = -1;
+const esp_err_nvs_not_initialized = 0x1101;
+const esp_err_nvs_not_found = 0x1102;
+const esp_err_nvs_type_mismatch = 0x1103;
+const esp_err_nvs_read_only = 0x1104;
+const esp_err_nvs_not_enough_space = 0x1105;
+const esp_err_nvs_invalid_name = 0x1106;
+const esp_err_nvs_invalid_handle = 0x1107;
+const esp_err_nvs_key_too_long = 0x1109;
+const esp_err_nvs_invalid_length = 0x110c;
+const esp_err_nvs_value_too_long = 0x110e;
+
+// A handle packs the namespace index and the open mode; the tag catches stray values.
+const handle_tag: u32 = 0x4e56_0000;
+
+fn nvs_handle(handle: u32) ?Nvs.Handle {
+    const store = nvs_store orelse return null;
+    if (handle & 0xffff_0000 != handle_tag or handle & 0xff == 0) return null;
+    return .{
+        .storage = store,
+        .ns = @truncate(handle),
+        .mode = if (handle & 0x100 != 0) .read_write else .read_only,
+    };
 }
 
-pub fn nvs_get_i8() callconv(.c) void {
-    @panic("nvs_get_i8: not implemented");
+fn nvs_err(err: anyerror) c_int {
+    return switch (err) {
+        error.NotFound => esp_err_nvs_not_found,
+        error.TypeMismatch => esp_err_nvs_type_mismatch,
+        error.ReadOnly => esp_err_nvs_read_only,
+        error.NotEnoughSpace, error.TooManyNamespaces => esp_err_nvs_not_enough_space,
+        error.InvalidName => esp_err_nvs_invalid_name,
+        error.BufferTooSmall => esp_err_nvs_invalid_length,
+        error.ValueTooLong => esp_err_nvs_value_too_long,
+        else => blk: {
+            log.err("nvs: {t}", .{err});
+            break :blk esp_fail;
+        },
+    };
 }
 
-pub fn nvs_set_u8() callconv(.c) void {
-    @panic("nvs_set_u8: not implemented");
+fn nvs_key(key: [*c]const u8) error{ KeyTooLong, InvalidName }![]const u8 {
+    if (key == null) return error.InvalidName;
+    const k = std.mem.span(key);
+    if (k.len > @import("../nvs.zig").max_key_len) return error.KeyTooLong;
+    return k;
 }
 
-pub fn nvs_get_u8() callconv(.c) void {
-    @panic("nvs_get_u8: not implemented");
+fn nvs_call(handle: u32, key: [*c]const u8, comptime f: anytype, args: anytype) c_int {
+    const h = nvs_handle(handle) orelse return esp_err_nvs_invalid_handle;
+    const k = nvs_key(key) catch |err| return switch (err) {
+        error.KeyTooLong => esp_err_nvs_key_too_long,
+        error.InvalidName => esp_err_nvs_invalid_name,
+    };
+    nvs_mutex.lock();
+    defer nvs_mutex.unlock();
+    @call(.auto, f, .{ h, k } ++ args) catch |err| return nvs_err(err);
+    return esp_ok;
 }
 
-pub fn nvs_set_u16() callconv(.c) void {
-    @panic("nvs_set_u16: not implemented");
+fn nvs_set_int(comptime T: type) fn (u32, [*c]const u8, T) callconv(.c) c_int {
+    return struct {
+        fn set(handle: u32, key: [*c]const u8, value: T) callconv(.c) c_int {
+            log.debug("nvs_set_{s} {s}", .{ @typeName(T), key });
+            return nvs_call(handle, key, store_int, .{value});
+        }
+        fn store_int(h: Nvs.Handle, k: []const u8, value: T) !void {
+            try h.set(T, k, value);
+        }
+    }.set;
 }
 
-pub fn nvs_get_u16() callconv(.c) void {
-    @panic("nvs_get_u16: not implemented");
+fn nvs_get_int(comptime T: type) fn (u32, [*c]const u8, [*c]T) callconv(.c) c_int {
+    return struct {
+        fn get(handle: u32, key: [*c]const u8, out: [*c]T) callconv(.c) c_int {
+            log.debug("nvs_get_{s} {s}", .{ @typeName(T), key });
+            if (out == null) return esp_fail;
+            return nvs_call(handle, key, load_int, .{out});
+        }
+        fn load_int(h: Nvs.Handle, k: []const u8, out: [*c]T) !void {
+            out.* = try h.get(T, k);
+        }
+    }.get;
 }
 
-pub fn nvs_open() callconv(.c) void {
-    @panic("nvs_open: not implemented");
+pub const nvs_set_i8 = nvs_set_int(i8);
+pub const nvs_get_i8 = nvs_get_int(i8);
+pub const nvs_set_u8 = nvs_set_int(u8);
+pub const nvs_get_u8 = nvs_get_int(u8);
+pub const nvs_set_u16 = nvs_set_int(u16);
+pub const nvs_get_u16 = nvs_get_int(u16);
+
+pub fn nvs_open(name: [*c]const u8, open_mode: c_uint, out_handle: [*c]u32) callconv(.c) c_int {
+    log.debug("nvs_open {s} {}", .{ name, open_mode });
+    const store = nvs_store orelse return esp_err_nvs_not_initialized;
+    if (name == null or out_handle == null) return esp_err_nvs_invalid_name;
+
+    // ESP-IDF: NVS_READONLY = 0, NVS_READWRITE = 1.
+    const read_write = open_mode != 0;
+    nvs_mutex.lock();
+    defer nvs_mutex.unlock();
+    const h = store.open(std.mem.span(name), if (read_write) .read_write else .read_only) catch |err|
+        return nvs_err(err);
+    out_handle.* = handle_tag | @as(u32, @intFromBool(read_write)) << 8 | h.ns;
+    return esp_ok;
 }
 
-pub fn nvs_close() callconv(.c) void {
-    @panic("nvs_close: not implemented");
+pub fn nvs_close(handle: u32) callconv(.c) void {
+    log.debug("nvs_close {x}", .{handle});
 }
 
-pub fn nvs_commit() callconv(.c) void {
-    @panic("nvs_commit: not implemented");
+pub fn nvs_commit(handle: u32) callconv(.c) c_int {
+    log.debug("nvs_commit {x}", .{handle});
+    // Every write already reaches the flash.
+    return if (nvs_handle(handle) != null) esp_ok else esp_err_nvs_invalid_handle;
 }
 
-pub fn nvs_set_blob() callconv(.c) void {
-    @panic("nvs_set_blob: not implemented");
+pub fn nvs_set_blob(handle: u32, key: [*c]const u8, value: ?*const anyopaque, length: usize) callconv(.c) c_int {
+    log.debug("nvs_set_blob {s} {}", .{ key, length });
+    if (value == null and length != 0) return esp_fail;
+    const data: []const u8 = if (length == 0) &.{} else @as([*]const u8, @ptrCast(value.?))[0..length];
+    return nvs_call(handle, key, struct {
+        fn f(h: Nvs.Handle, k: []const u8, d: []const u8) !void {
+            try h.set_blob(k, d);
+        }
+    }.f, .{data});
 }
 
-pub fn nvs_get_blob() callconv(.c) void {
-    @panic("nvs_get_blob: not implemented");
+/// With a null `out_value`, only reports the size in `length`, like ESP-IDF.
+pub fn nvs_get_blob(handle: u32, key: [*c]const u8, out_value: ?*anyopaque, length: [*c]usize) callconv(.c) c_int {
+    log.debug("nvs_get_blob {s}", .{key});
+    if (length == null) return esp_fail;
+    return nvs_call(handle, key, struct {
+        fn f(h: Nvs.Handle, k: []const u8, out: ?*anyopaque, len: [*c]usize) !void {
+            const size = try h.blob_len(k);
+            const dest = out orelse {
+                len.* = size;
+                return;
+            };
+            if (len.* < size) {
+                len.* = size;
+                return error.BufferTooSmall;
+            }
+            len.* = (try h.get_blob(k, @as([*]u8, @ptrCast(dest))[0..size])).len;
+        }
+    }.f, .{ out_value, length });
 }
 
-pub fn nvs_erase_key() callconv(.c) void {
-    @panic("nvs_erase_key: not implemented");
+pub fn nvs_erase_key(handle: u32, key: [*c]const u8) callconv(.c) c_int {
+    log.debug("nvs_erase_key {s}", .{key});
+    return nvs_call(handle, key, struct {
+        fn f(h: Nvs.Handle, k: []const u8) !void {
+            try h.erase_key(k);
+        }
+    }.f, .{});
 }
 
 pub fn get_random(buf: [*c]u8, len: usize) callconv(.c) c_int {
